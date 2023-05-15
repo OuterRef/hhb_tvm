@@ -1,0 +1,1 @@
+/home/data/userhome/chenyaqi/HHB/csi-nn2/c906_static_build/CMakeFiles/c906_static.dir

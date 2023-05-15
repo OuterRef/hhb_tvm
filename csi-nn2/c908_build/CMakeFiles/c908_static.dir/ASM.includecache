@@ -1,0 +1,20 @@
+#IncludeRegexLine: ^[ 	]*#[ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/fp16/gemm_fp16_ncxhwx.S
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/fp32/gemm_fp32_ncxhwx.S
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/int4/gemm_int4_dot_ncxhwx.S
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/int8/gemm_int16_ncxhwx.S
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/int8/gemm_int8_dot_ncxhwx.S
+
+/home/data/userhome/chenyaqi/HHB/csi-nn2/source/c908_opt/int8/gemm_int8_ncxhwx.S
+
