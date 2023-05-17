@@ -1,1 +1,0 @@
-/home/data/userhome/chenyaqi/HHB/csi-nn2/c920_build/CMakeFiles/c920_static.dir
