@@ -8,7 +8,7 @@ install_nn2/
 tools/
 .vscode/
 
-./c906_static_build/
-./c908_build/
-./c920_build
-./x86_ref_build/
+c906_static_build/
+c908_build/
+c920_build
+x86_ref_build/
