@@ -35,7 +35,8 @@ from tvm.tir.expr import ExprOp
 
 from . import _ffi_api
 from ..backend.utils import mangle_module_name
-
+from .. import function as _function
+TILING_FUNCS = {}
 
 def build_config(opt_level=2, required_pass=None, disabled_pass=None, trace=None):
     """Configure the build behavior by setting config variables. This function
@@ -1577,3 +1578,45 @@ def InlineCompilerFunctionsBoundTo(global_vars):
         The pass.
     """
     return _ffi_api.InlineCompilerFunctionsBoundTo(global_vars)
+
+def LayerGroupTiling(mod)
+    class Convert2Relay(relay.ExprMutator):
+        """Convert qnn model to relay"""
+
+        def __init__(self):
+            super(Convert2Relay, self).__init__()
+        
+
+        
+
+        def visit_call(self, call):
+            op_args = [self.visit(arg) for arg in call.args]
+            if call.op.name in RELAY_FUNCS:
+                func = getattr(self, RELAY_FUNCS[call.op.name])
+                new_call = func(call=call, op_args=op_args)
+            else:
+                raise Exception(f"{call.op.name} not registed.")
+
+            return new_call
+
+
+        @tiling_func_register("qnn.csi.dense")
+        def dense(self, op_args, attrs, tiling_shape):
+            """convert dense to relay"""
+            units = attrs["units"]
+            data = op_args[0]
+            weight = self.constant_convert(op_args[1], q_params[1])
+            bias = self.constant_convert(op_args[2], q_params[2])
+            out = _op.nn.dense(data, weight, units)
+            if bias.data.numpy().size == units:
+                out = _op.nn.bias_add(out, bias)
+            return out
+
+        def visit_function(self, fn):
+            new_params = [self.visit(x) for x in fn.params]
+            new_body = self.visit(fn.body)
+            return _function.Function(list(new_params), new_body)
+
+    mod["main"] = Convert2Relay().visit(mod["main"])
+
+    return mod
