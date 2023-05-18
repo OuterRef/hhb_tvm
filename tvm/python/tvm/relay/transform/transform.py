@@ -36,6 +36,7 @@ from tvm.tir.expr import ExprOp
 from . import _ffi_api
 from ..backend.utils import mangle_module_name
 from .. import function as _function
+from .. import op as _op
 TILING_FUNCS = {}
 
 def build_config(opt_level=2, required_pass=None, disabled_pass=None, trace=None):
@@ -1579,44 +1580,81 @@ def InlineCompilerFunctionsBoundTo(global_vars):
     """
     return _ffi_api.InlineCompilerFunctionsBoundTo(global_vars)
 
-def LayerGroupTiling(mod)
-    class Convert2Relay(relay.ExprMutator):
+# TILING_FUNCS = {}
+# def tiling_func_register(func_name):
+#     """Register func in TILING_FUNCS"""
+
+#     def decorator(func):
+#         TILING_FUNCS[func_name] = func.__name__
+
+#         def wrapper(self, call, op_args):
+            
+#             return func(self, op_args, call.attrs)
+
+#         return wrapper
+
+#     return decorator
+
+
+def LayerGroupTiling(mod):
+    class LayerGroupTilingClass(relay.ExprMutator):
         """Convert qnn model to relay"""
 
         def __init__(self):
-            super(Convert2Relay, self).__init__()
+            super(LayerGroupTilingClass, self).__init__()
         
-
-        
-
         def visit_call(self, call):
-            op_args = [self.visit(arg) for arg in call.args]
-            if call.op.name in RELAY_FUNCS:
-                func = getattr(self, RELAY_FUNCS[call.op.name])
-                new_call = func(call=call, op_args=op_args)
-            else:
-                raise Exception(f"{call.op.name} not registed.")
+            call_list = []
+            fuse_num = 0
+            current_call = call
+            call_list.append(current_call)
+            op_args = [self.visit(arg) for arg in current_call.args]
+            fuse_num = fuse_num + 1
+            # Todo:遍历到网络输入时.前面的算子需要不存在分支
+            print(call.op.name)
+            while (fuse_num < 1 ) :
+                print(fuse_num)
+                print("\n")
+                current_call = op_args[0]
+                op_args = [self.visit(arg) for arg in current_call.args]
+                # Todo: if (符合要求):
+                fuse_num = fuse_num + 1
+                call_list.append(current_call)
 
-            return new_call
+            # 确定tilingshape
+            tile_num = 2
+            split_dim = 3
+            # 对各层进行tiling
+            group_out = []
+            input_tile = []
+            
+            slice_0 = _op.strided_slice(data = call_list[0].args[0], begin = [0], end = [4], axes = [split_dim])
+            input_tile.append(slice_0)
+            slice_1 = _op.strided_slice(data = call_list[0].args[0], begin = [4], end = [8], axes = [split_dim])
+            input_tile.append(slice_1)
+            
+            group_out.append(input_tile)
+            
+            fuse_index = fuse_num
+            while fuse_index > 0:
+                op_out = []
+                fuse_index = fuse_index - 1
+                current_call = call_list[fuse_num]
+                
+                pre_op_out = group_out[fuse_num - 1 - fuse_index]
+                
+                for i in range(tile_num):
+                    pre_tile_out = pre_op_out[i]
+                
+                    new_op = _forward_op(current_call, pre_tile_out)
+                    op_out.append(new_op)
+                         
+                group_out.append(op_out)
+            
+            expr = _op.concatenate(group_out[fuse_num], split_dim)
 
+            return expr
 
-        @tiling_func_register("qnn.csi.dense")
-        def dense(self, op_args, attrs, tiling_shape):
-            """convert dense to relay"""
-            units = attrs["units"]
-            data = op_args[0]
-            weight = self.constant_convert(op_args[1], q_params[1])
-            bias = self.constant_convert(op_args[2], q_params[2])
-            out = _op.nn.dense(data, weight, units)
-            if bias.data.numpy().size == units:
-                out = _op.nn.bias_add(out, bias)
-            return out
-
-        def visit_function(self, fn):
-            new_params = [self.visit(x) for x in fn.params]
-            new_body = self.visit(fn.body)
-            return _function.Function(list(new_params), new_body)
-
-    mod["main"] = Convert2Relay().visit(mod["main"])
+    mod["main"] = LayerGroupTilingClass().visit(mod["main"])
 
     return mod
