@@ -17,7 +17,7 @@
 # pylint: disable=wildcard-import, redefined-builtin
 """Automatic quantization utilities."""
 from __future__ import absolute_import as _abs
-
+from .quantize import _forward_op
 from .quantize import *
 from .quantize_hhb import quantize_hhb
 from ._partition import register_partition_function

@@ -31,12 +31,13 @@ from tvm import relay, te
 from tvm.runtime import ndarray as _nd
 from tvm.tir.expr import ExprOp
 
+# from ..quantize import _forward_op
 # from tvm.relay.dataflow_pattern import DFPatternCallback, wildcard, is_op, rewrite
 
 from . import _ffi_api
 from ..backend.utils import mangle_module_name
 from .. import function as _function
-from .. import op as _op
+# from .. import op as _op
 TILING_FUNCS = {}
 
 def build_config(opt_level=2, required_pass=None, disabled_pass=None, trace=None):
@@ -1604,56 +1605,65 @@ def LayerGroupTiling(mod):
             super(LayerGroupTilingClass, self).__init__()
         
         def visit_call(self, call):
-            call_list = []
-            fuse_num = 0
-            current_call = call
-            call_list.append(current_call)
-            op_args = [self.visit(arg) for arg in current_call.args]
-            fuse_num = fuse_num + 1
-            # Todo:遍历到网络输入时.前面的算子需要不存在分支
-            print(call.op.name)
-            while (fuse_num < 1 ) :
-                print(fuse_num)
-                print("\n")
-                current_call = op_args[0]
-                op_args = [self.visit(arg) for arg in current_call.args]
-                # Todo: if (符合要求):
-                fuse_num = fuse_num + 1
-                call_list.append(current_call)
-
-            # 确定tilingshape
-            tile_num = 2
-            split_dim = 3
-            # 对各层进行tiling
-            group_out = []
-            input_tile = []
+            # call_list = []
+            # fuse_num = 0
+            # current_call = call
+            # call_list.append(current_call)
+            # current_arg = call.args
             
-            slice_0 = _op.strided_slice(data = call_list[0].args[0], begin = [0], end = [4], axes = [split_dim])
-            input_tile.append(slice_0)
-            slice_1 = _op.strided_slice(data = call_list[0].args[0], begin = [4], end = [8], axes = [split_dim])
-            input_tile.append(slice_1)
-            
-            group_out.append(input_tile)
-            
-            fuse_index = fuse_num
-            while fuse_index > 0:
-                op_out = []
-                fuse_index = fuse_index - 1
-                current_call = call_list[fuse_num]
+            # fuse_num = fuse_num + 1
+            # # Todo:遍历到网络输入时.前面的算子需要不存在分支
+            # print(call.op.name)
+            # while (fuse_num < 1 ) :
+            #     print(fuse_num)
+            #     print("\n")
+            #     current_call = current_arg[0]
                 
-                pre_op_out = group_out[fuse_num - 1 - fuse_index]
-                
-                for i in range(tile_num):
-                    pre_tile_out = pre_op_out[i]
-                
-                    new_op = _forward_op(current_call, pre_tile_out)
-                    op_out.append(new_op)
-                         
-                group_out.append(op_out)
+            #     # Todo: if (符合要求):
+            #     fuse_num = fuse_num + 1
+            #     call_list.append(current_call)
+            #     current_arg = current_call.args
             
-            expr = _op.concatenate(group_out[fuse_num], split_dim)
-
-            return expr
+            # op_args = [self.visit(arg) for arg in current_call.args]
+            # # 确定tilingshape
+            # tile_num = 2
+            # split_dim = 3
+            # # 对各层进行tiling
+            # group_out = []
+            # input_tile = []
+            
+            # slice_0 = relay.op.strided_slice(data = call_list[0].args[0], begin = [0], end = [4], axes = [split_dim])
+            # input_tile.append(slice_0)
+            # slice_1 = relay.op.strided_slice(data = call_list[0].args[0], begin = [4], end = [8], axes = [split_dim])
+            # input_tile.append(slice_1)
+            
+            # group_out.append(input_tile)
+            
+            # fuse_index = fuse_num
+            # while fuse_index > 0:
+            #     op_out = []
+            #     fuse_index = fuse_index - 1
+            #     current_call = call_list[0]
+                
+            #     pre_op_out = group_out[fuse_num - 1 - fuse_index]
+                
+            #     for i in range(tile_num):
+            #         pre_tile_out = pre_op_out[i]
+            #         print("*********************************************************")
+            #         print(pre_tile_out)
+                    
+            #         print("*********************************************************")
+            #         #new_op = relay.quantize._forward_op(current_call, [pre_tile_out])
+            #         new_op = relay.op.nn.relu(pre_tile_out)
+            #         print("*********************************************************")
+            #         op_out.append(new_op)
+            #     print("*********************************************************")        
+            #     group_out.append(op_out)
+            # print("***************************split_dim******************************")
+            # expr =  relay.op.concatenate(group_out[fuse_num], split_dim)
+            # print("***************************concatenate******************************")
+            op_args = [self.visit(arg) for arg in call.args]
+            return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
 
     mod["main"] = LayerGroupTilingClass().visit(mod["main"])
 
