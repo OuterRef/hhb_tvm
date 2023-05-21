@@ -1605,66 +1605,131 @@ def LayerGroupTiling(mod):
             super(LayerGroupTilingClass, self).__init__()
         
         def visit_call(self, call):
-            # call_list = []
-            # fuse_num = 0
-            # current_call = call
-            # call_list.append(current_call)
-            # current_arg = call.args
+            call_list = []
+            fuse_num = 0
+            current_call = call
+            call_list.append(current_call)
+            print("add")
+            current_arg = call.args
             
-            # fuse_num = fuse_num + 1
-            # # Todo:遍历到网络输入时.前面的算子需要不存在分支
-            # print(call.op.name)
-            # while (fuse_num < 1 ) :
-            #     print(fuse_num)
-            #     print("\n")
-            #     current_call = current_arg[0]
+            fuse_num = fuse_num + 1
+            # Todo:遍历到网络输入时.前面的算子需要不存在分支
+            print(call.op.name)
+            while (fuse_num < 3 ) :
+                print(fuse_num)
+                print("\n")
+                current_call = current_arg[0]
                 
-            #     # Todo: if (符合要求):
-            #     fuse_num = fuse_num + 1
-            #     call_list.append(current_call)
-            #     current_arg = current_call.args
+                # Todo: if (符合要求):
+                fuse_num = fuse_num + 1
+                call_list.append(current_call)
+                print("add")
+                current_arg = current_call.args
             
-            # op_args = [self.visit(arg) for arg in current_call.args]
-            # # 确定tilingshape
-            # tile_num = 2
-            # split_dim = 3
-            # # 对各层进行tiling
-            # group_out = []
-            # input_tile = []
+            op_args = [self.visit(arg) for arg in current_call.args]
+            # 确定tilingshape
+            tile_num = 2
+            split_dim = 3
+            # 对各层进行tiling
+            group_out = []
+            input_tile = []
             
-            # slice_0 = relay.op.strided_slice(data = call_list[0].args[0], begin = [0], end = [4], axes = [split_dim])
-            # input_tile.append(slice_0)
-            # slice_1 = relay.op.strided_slice(data = call_list[0].args[0], begin = [4], end = [8], axes = [split_dim])
-            # input_tile.append(slice_1)
+            slice_0 = relay.op.strided_slice(data = op_args[0], begin = [0], end = [4], axes = [split_dim])
+            input_tile.append(slice_0)
+            slice_1 = relay.op.strided_slice(data = op_args[0], begin = [4], end = [8], axes = [split_dim])
+            input_tile.append(slice_1)
             
-            # group_out.append(input_tile)
+            group_out.append(input_tile)
             
-            # fuse_index = fuse_num
-            # while fuse_index > 0:
-            #     op_out = []
-            #     fuse_index = fuse_index - 1
-            #     current_call = call_list[0]
+            fuse_index = fuse_num
+            while fuse_index > 0:
+                op_out = []
+                fuse_index = fuse_index - 1
+                current_call = call_list[0]
                 
-            #     pre_op_out = group_out[fuse_num - 1 - fuse_index]
+                pre_op_out = group_out[fuse_num - 1 - fuse_index]
                 
-            #     for i in range(tile_num):
-            #         pre_tile_out = pre_op_out[i]
-            #         print("*********************************************************")
-            #         print(pre_tile_out)
+                for i in range(tile_num):
+                    pre_tile_out = pre_op_out[i]
+                    print("*********************************************************")
+                    print(pre_tile_out)
                     
-            #         print("*********************************************************")
-            #         #new_op = relay.quantize._forward_op(current_call, [pre_tile_out])
-            #         new_op = relay.op.nn.relu(pre_tile_out)
-            #         print("*********************************************************")
-            #         op_out.append(new_op)
-            #     print("*********************************************************")        
-            #     group_out.append(op_out)
-            # print("***************************split_dim******************************")
-            # expr =  relay.op.concatenate(group_out[fuse_num], split_dim)
-            # print("***************************concatenate******************************")
-            op_args = [self.visit(arg) for arg in call.args]
-            return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
-
+                    print("*********************************************************")
+                    #new_op = relay.quantize._forward_op(current_call, [pre_tile_out])
+                    new_op = relay.op.nn.relu(pre_tile_out)
+                    print("*********************************************************")
+                    op_out.append(new_op)
+                print("*********************************************************")        
+                group_out.append(op_out)
+            print("***************************split_dim******************************")
+            new_call =  relay.op.concatenate(group_out[fuse_num], split_dim)
+            print("***************************concatenate******************************")
+            # op_args = [self.visit(arg) for arg in call.args]
+            # new_call = relay.nn.relu(op_args[0])
+            
+            return new_call
     mod["main"] = LayerGroupTilingClass().visit(mod["main"])
+
+    return mod
+
+def Deconv2dToConv2d(mod):
+    class Deconv2dToConv2dClass(relay.ExprMutator):
+        """Convert qnn model to relay"""
+
+        def __init__(self):
+            super(Deconv2dToConv2dClass, self).__init__()
+        
+        def visit_call(self, call):
+            
+            op_args = [self.visit(arg) for arg in call.args]
+            
+            pre_call = op_args[0]
+            if call.op.name == "qnn.csi.conv2d":
+                if not isinstance(pre_call, Call):
+                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+
+                if pre_call.op.name in self.target_ops:
+                    return self.get_new_op(call, pre_call, op_args)
+
+            elif call.op.name == "nn.conv2d_transpose":
+                if not isinstance(pre_call, Call) or not isinstance(op_args[1], Constant):
+                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+                in_name = pre_call.op.name
+                if in_name not in self.target_ops:
+                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+
+                bias = op_args[1].data.asnumpy()
+                b_shape = bias.shape
+                in_shape = _infer_shape(pre_call)
+                need_broadcast = False
+                b_rank = len(b_shape)
+                if b_rank == 1:
+                    b_size = b_shape[0]
+                    need_broadcast = b_shape[0] == 1
+                elif b_rank == 0:
+                    need_broadcast = True
+                else:
+                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+
+                if need_broadcast:
+                    if in_name == "qnn.csi.dense":
+                        bias = np.zeros(in_shape[2]) + bias
+                        op_args[1] = relay.const(bias)
+                        return self.get_new_op(call, pre_call, op_args)
+                    else:
+                        bias = np.zeros(in_shape[1]) + bias
+                        op_args[1] = relay.const(bias)
+                        return self.get_new_op(call, pre_call, op_args)
+                else:
+                    if in_name == "qnn.csi.dense":
+                        if b_size == in_shape[-1]:
+                            return self.get_new_op(call, pre_call, op_args)
+                    else:
+                        if b_size == in_shape[1]:
+                            return self.get_new_op(call, pre_call, op_args)
+
+            return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
+            
+    mod["main"] = Deconv2dToConv2dClass().visit(mod["main"])
 
     return mod
