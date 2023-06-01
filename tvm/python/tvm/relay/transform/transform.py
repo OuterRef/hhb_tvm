@@ -25,7 +25,7 @@ import types
 import warnings
 
 import numpy as np
-
+import math
 import tvm.ir
 from tvm import relay, te
 from tvm.runtime import ndarray as _nd
@@ -37,6 +37,7 @@ from tvm.tir.expr import ExprOp
 from . import _ffi_api
 from ..backend.utils import mangle_module_name
 from .. import function as _function
+
 # from .. import op as _op
 TILING_FUNCS = {}
 
@@ -1684,49 +1685,76 @@ def Deconv2dToConv2d(mod):
             op_args = [self.visit(arg) for arg in call.args]
             
             pre_call = op_args[0]
-            if call.op.name == "qnn.csi.conv2d":
-                if not isinstance(pre_call, Call):
-                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
 
-                if pre_call.op.name in self.target_ops:
-                    return self.get_new_op(call, pre_call, op_args)
+            if call.op.name == "nn.conv2d_transpose":
+                if not call.attrs.data_layout == "NCHW" or not call.attrs.kernel_layout == "OIHW" :
+                    return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
+                
+                ori_weight = op_args[1].data.asnumpy()
+                b_shape = ori_weight.shape
+                in_shape = relay.frontend.common.infer_shape(pre_call)
+                
+                stride = call.attrs.strides
+                
+                # kernel output channels
+                original_filter_num = int(b_shape[0])
+                # kernel input channels
+                original_map_num = int(b_shape[1])
+                # kernel input size
+                original_row_num = int(b_shape[2])
+                original_col_num = int(b_shape[3])
+                
+                stride_h = int(stride[0])
+                stride_w = int(stride[1])
 
-            elif call.op.name == "nn.conv2d_transpose":
-                if not isinstance(pre_call, Call) or not isinstance(op_args[1], Constant):
-                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
-                in_name = pre_call.op.name
-                if in_name not in self.target_ops:
-                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+                # partition kernel size
+                
+                spilt_row_num = int(original_row_num / stride_h) if (original_row_num % stride_h == 0) else int(original_row_num / stride_h + 1) 
+                spilt_col_num = int(original_col_num / stride_w) if (original_col_num % stride_w == 0) else int(original_col_num / stride_w + 1) 
 
-                bias = op_args[1].data.asnumpy()
-                b_shape = bias.shape
-                in_shape = _infer_shape(pre_call)
-                need_broadcast = False
-                b_rank = len(b_shape)
-                if b_rank == 1:
-                    b_size = b_shape[0]
-                    need_broadcast = b_shape[0] == 1
-                elif b_rank == 0:
-                    need_broadcast = True
-                else:
-                    return Call(call.op, op_args, call.attrs, call.type_args, call.span)
+                spilt_filter_num = stride_h ** stride_w  # partition number
 
-                if need_broadcast:
-                    if in_name == "qnn.csi.dense":
-                        bias = np.zeros(in_shape[2]) + bias
-                        op_args[1] = relay.const(bias)
-                        return self.get_new_op(call, pre_call, op_args)
-                    else:
-                        bias = np.zeros(in_shape[1]) + bias
-                        op_args[1] = relay.const(bias)
-                        return self.get_new_op(call, pre_call, op_args)
-                else:
-                    if in_name == "qnn.csi.dense":
-                        if b_size == in_shape[-1]:
-                            return self.get_new_op(call, pre_call, op_args)
-                    else:
-                        if b_size == in_shape[1]:
-                            return self.get_new_op(call, pre_call, op_args)
+                trans_w_array = np.zeros((spilt_filter_num, original_filter_num, original_map_num, spilt_row_num, spilt_col_num),
+                                        dtype=ori_weight.dtype)
+
+                n_pad = ((0, 0), (0, 0), (spilt_col_num * stride_w - b_shape[3], 0), (spilt_row_num * stride_h - b_shape[2], 0))
+                w_array = np.pad(ori_weight, n_pad, 'constant', constant_values=0)
+                # transform
+                for cur_spilt_num in range(spilt_filter_num):
+                    for cur_row_num in range(spilt_row_num):
+                        for cur_col_num in range(spilt_col_num):
+                            trans_w_array[cur_spilt_num,
+                                        :, :, spilt_row_num - cur_row_num - 1,
+                                        spilt_col_num - cur_col_num - 1] = w_array[
+                                :, :, stride_h * cur_row_num + cur_spilt_num // stride_h,
+                                stride_w * cur_col_num + cur_spilt_num % stride_w]
+                
+                trans_w_array = trans_w_array.transpose(1,0,2,3,4)
+                trans_w_array = trans_w_array.reshape(spilt_filter_num * original_filter_num, original_map_num, spilt_row_num, spilt_col_num)
+                
+                transpose_weight = relay.const(trans_w_array)
+                
+                padding = (int(spilt_row_num / 2), int(spilt_col_num / 2))
+                print (padding)
+                out = relay.op.nn.conv2d(
+                    op_args[0],
+                    transpose_weight,
+                    kernel_size=(spilt_row_num, spilt_col_num),
+                    padding=padding,
+                )
+                
+                new_shape = [1, original_filter_num, stride_h, stride_w, in_shape[2], in_shape[3]]
+                out_shape = [1, original_filter_num, in_shape[2] * stride_h, in_shape[3]* stride_w]
+
+                data = relay.op.transform.reshape(out, new_shape)
+                # The data will be transposed to
+                # [b, oc, h, upscale_factor, w, upscale_factor]
+                # for further reshape
+                axes = [0, 1, 4, 2, 5, 3]
+                data = relay.op.transform.transpose(data, axes)
+                data = relay.op.transform.reshape(data, out_shape)
+                return data
+                
 
             return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
             

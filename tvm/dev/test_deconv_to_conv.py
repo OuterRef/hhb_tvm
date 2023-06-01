@@ -13,8 +13,8 @@ from tvm.contrib import graph_executor
 
 op_name = "conv_unit_test" # the name of save_dir and txt
 dtype = "float32"   # the Tensor data type
-data_shape = (1, 1, 1, 8)  # the Tensor data shape
-weight_shape = (1, 3, 3, 3)  # the Tensor weight shape
+data_shape = (1, 3, 4, 4)  # the Tensor data shape
+weight_shape = (4, 3, 2, 2)  # the Tensor weight shape
 bias_shape = (1,)
 have_weight = True
 have_bias = True
@@ -35,7 +35,7 @@ nbit_weight = 8
 do_simulation = False
 
 #setup data
-np_data = tvm.nd.array(np.random.rand(1, 1, 1, 8).astype(dtype))
+np_data = tvm.nd.array(np.ones(data_shape).astype(dtype))
 # np.random.uniform(-1, 1, data_shape)
 # np_data = np.ones((1, 3, 224, 224))
 # np_weight = tvm.nd.array(np.random.uniform(-1, 1, weight_shape).astype(dtype))
@@ -43,18 +43,20 @@ np_data = tvm.nd.array(np.random.rand(1, 1, 1, 8).astype(dtype))
 print("input")
 print(np_data)
 
+# np_weight = np.ones(weight_shape).astype(dtype)
 np_weight = tvm.nd.array(np.ones(weight_shape).astype(dtype))
-
+print("weight")
+print(np_weight)
 params = {
         "weight": np_weight,
 }
 
 
 #create the save_dir
-savepath = "./" + op_name
-if not os.path.exists(savepath):
-    os.mkdir(savepath)
-savepath = savepath + "/"
+# savepath = "./" + op_name
+# if not os.path.exists(savepath):
+#     os.mkdir(savepath)
+# savepath = savepath + "/"
 
 # create the op net
 # def simplenet():    
@@ -80,23 +82,29 @@ savepath = savepath + "/"
 
 #     # save the infp to txt
 #     return op
+etab = relay.frontend.common.ExprTable()
 
 def simplenet():    
 
+    kernel_size = (2,2)
+    strides = (2,2)
+    padding = (0,0,0,0)
+    channels = weight_shape[0]
+
     data = relay.var("data", shape=data_shape, dtype=dtype)
-
-    op0 = relay.nn.relu(
+#     weight = etab.new_const(np_weight)
+    weight = relay.var("weight",dtype=dtype)
+    op = relay.nn.conv2d_transpose(
             data=data,
-            )
-    op1 = relay.nn.relu(
-            data=op0,
-            )
-    op2 = relay.nn.relu(
-            data=op1,
-            )
+            weight=weight,
+            channels=channels,
+            kernel_size=kernel_size,
+            strides=strides,
+            padding=padding,
+            kernel_layout='OIHW',
+            data_layout='NCHW')
 
-    # save the infp to txt
-    return op2
+    return op
 #####################################
 # Determine quantization parameters
 #####################################
@@ -127,8 +135,15 @@ mod=relay.Function(relay.analysis.free_vars(net), net)
 mod_original = tvm.IRModule.from_expr(mod)
 
 #print(mod_original)
+if params:
+    mod_original["main"] = tvm.relay.build_module.bind_params_by_name(mod_original["main"], params)
 
-
+seq = tvm.transform.Sequential(
+    [
+    relay.transform.InferType(),
+    ]
+)
+seq(mod_original)
 target = "llvm"
 
 #####################################
@@ -146,17 +161,21 @@ print(mod_original)
 # with tvm.transform.PassContext(opt_level=3):
 #     with QConfig:
 #         mod_tiling, dbg_mod = relay.transform.LayerGroupTiling(mod_original, params=params)
-mod_tiling = relay.transform.LayerGroupTiling(mod_original)
+# mod_tiling = relay.transform.LayerGroupTiling(mod_original)
 
-print("tiling\n")
-print(mod_tiling)
+# print("tiling\n")
+# print(mod_tiling)
+mod_original = relay.transform.Deconv2dToConv2d(mod_original)
+
+print("transpose\n")
+print(mod_original)
 ######################################
 # Build and Run the quantized model
 ######################################
 
 with tvm.transform.PassContext(opt_level=3):
     with QConfig:
-        quantized_lib = relay.build(mod_original, target=target, params=params)
+        quantized_lib = relay.build(mod_original, target=target)
 
 compiled_module = graph_executor.GraphModule(quantized_lib["default"](dev))
 compiled_module.set_input("data",np_data)
