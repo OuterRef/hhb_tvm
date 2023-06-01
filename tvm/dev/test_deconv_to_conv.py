@@ -35,7 +35,7 @@ nbit_weight = 8
 do_simulation = False
 
 #setup data
-np_data = tvm.nd.array(np.ones(data_shape).astype(dtype))
+np_data = tvm.nd.array(np.random.rand(1, 3, 4, 4).astype(dtype))
 # np.random.uniform(-1, 1, data_shape)
 # np_data = np.ones((1, 3, 224, 224))
 # np_weight = tvm.nd.array(np.random.uniform(-1, 1, weight_shape).astype(dtype))
@@ -44,7 +44,7 @@ print("input")
 print(np_data)
 
 # np_weight = np.ones(weight_shape).astype(dtype)
-np_weight = tvm.nd.array(np.ones(weight_shape).astype(dtype))
+np_weight = tvm.nd.array(np.random.rand(4, 3, 2, 2).astype(dtype))
 print("weight")
 print(np_weight)
 params = {
@@ -165,10 +165,10 @@ print(mod_original)
 
 # print("tiling\n")
 # print(mod_tiling)
-mod_original = relay.transform.Deconv2dToConv2d(mod_original)
+# mod_original = relay.transform.Deconv2dToConv2d(mod_original)
 
-print("transpose\n")
-print(mod_original)
+# print("transpose\n")
+# print(mod_original)
 ######################################
 # Build and Run the quantized model
 ######################################
@@ -183,5 +183,30 @@ compiled_module.run()
 
 ## just get the first output
 network_output = compiled_module.get_output(0).numpy()
-
+print("ori output")
 print(network_output)
+
+
+mod_t = relay.transform.Deconv2dToConv2d(mod_original)
+
+print("transpose\n")
+print(mod_t)
+######################################
+# Build and Run the quantized model
+######################################
+
+with tvm.transform.PassContext(opt_level=3):
+    with QConfig:
+        t_lib = relay.build(mod_t, target=target)
+
+compiled_module1 = graph_executor.GraphModule(t_lib["default"](dev))
+compiled_module1.set_input("data",np_data)
+compiled_module1.run()
+
+## just get the first output
+network_output1 = compiled_module1.get_output(0).numpy()
+print("network_output1")
+print(network_output1)
+
+if (network_output1.all() == network_output.all()):
+    print("allsame")
