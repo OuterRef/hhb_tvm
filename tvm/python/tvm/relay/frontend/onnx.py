@@ -732,7 +732,11 @@ class ConvTranspose(OnnxOpConverter):
                 raise tvm.error.OpAttributeInvalid(msg.format(attr["auto_pad"]))
             if "auto_pad" in attr:
                 attr.pop("auto_pad")
-
+    
+         # cvt weight from IOHW--->OIHW
+        attr["kernel_layout"]= "OIHW"
+        inputs[1]=tvm.relay.op.transpose(inputs[1],axes=[1,0,2,3])
+        
         out = AttrCvt(
             op_name=dimension_picker("conv", "_transpose"),
             transforms={
@@ -813,6 +817,10 @@ class ConvTranspose(OnnxOpConverter):
             if "auto_pad" in attr:
                 attr.pop("auto_pad")
 
+         # cvt weight from IOHW--->OIHW
+        attr["kernel_layout"]= "OIHW"
+        inputs[1]=tvm.relay.op.transpose(inputs[1],axes=[1,0,2,3])
+        
         out = AttrCvt(
             op_name=dimension_picker("conv", "_transpose"),
             transforms={
