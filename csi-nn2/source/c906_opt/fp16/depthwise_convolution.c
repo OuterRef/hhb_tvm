@@ -48,3 +48,32 @@ int shl_c906_depthwise_conv2d_init_fp16(struct csinn_tensor *input, struct csinn
     }
     return CSINN_TRUE;
 }
+
+int shl_c906_depthwise_conv2d_relu_init_fp16(struct csinn_tensor *input, struct csinn_tensor *output,
+                                                  struct csinn_tensor *kernel, struct csinn_tensor *bias,
+                                                  struct csinn_conv2d_params *params)
+{
+    int32_t batch = input->dim[0];
+    int32_t in_ch = input->dim[1];
+    int32_t in_h = input->dim[2];
+    int32_t in_w = input->dim[3];
+
+    int32_t out_ch = output->dim[1];
+    int32_t out_h = output->dim[2];
+    int32_t out_w = output->dim[3];
+
+    int32_t kernel_h = kernel->dim[2];
+    int32_t kernel_w = kernel->dim[3];
+    int32_t stride_h = params->stride_height;
+    int32_t stride_w = params->stride_width;
+    struct csinn_callback *cb = params->base.cb;
+
+    if (kernel_h == 3 && kernel_w == 3 && stride_h == 1 && stride_w == 1) {
+        cb->exec = shl_c906_dwconv3x3s1_fp16_fuse_relu;
+    } else if (kernel_h == 3 && kernel_w == 3 && stride_h == 2 && stride_w == 2) {
+        cb->exec = shl_c906_dwconv3x3s2_fp16_fuse_relu;
+    } else {
+        cb->exec = shl_ref_depthwise_conv2d_relu_quant;
+    }
+    return CSINN_TRUE;
+}

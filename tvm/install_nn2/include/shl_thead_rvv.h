@@ -371,6 +371,8 @@ void shl_rvv_reorder_kernel_n8_fp16(__fp16 *a, __fp16 *sa, int m, int k, int ldx
 void shl_rvv_reorder_input_z16_fp16(__fp16 *b, __fp16 *sb, int k, int n, int ldx);
 void shl_rvv_gemm_8x16_fp16(__fp16 *dst, const __fp16 *sa, const __fp16 *sb, __fp16 *bias, int m,
                             int k, int n, int ldc);
+void shl_rvv_gemm_8x16_fp16_fuse_relu(__fp16 *dst, const __fp16 *sa, const __fp16 *sb, __fp16 *bias, int m,
+                            int k, int n, int ldc);
 
 void shl_rvv256_reorder_kernel_n16_fp16(__fp16 *a, __fp16 *sa, int m, int k, int ldx);
 void shl_rvv256_reorder_input_z16_fp16(__fp16 *b, __fp16 *sb, int k, int n, int ldx);

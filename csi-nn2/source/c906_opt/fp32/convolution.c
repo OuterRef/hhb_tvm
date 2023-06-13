@@ -83,3 +83,62 @@ int shl_c906_conv2d_init_fp32(struct csinn_tensor *input, struct csinn_tensor *o
     }
     return CSINN_TRUE;
 }
+
+int shl_c906_conv2d_relu_init_fp32(struct csinn_tensor *input, struct csinn_tensor *output,
+                              struct csinn_tensor *kernel, struct csinn_tensor *bias,
+                              struct csinn_conv2d_params *params)
+{
+    int32_t out_c = kernel->dim[0];
+    int32_t in_c = kernel->dim[1];
+    int32_t in_h = input->dim[2];
+    int32_t in_w = input->dim[3];
+    int32_t kernel_h = kernel->dim[2];
+    int32_t kernel_w = kernel->dim[3];
+    int32_t stride_h = params->stride_height;
+    int32_t stride_w = params->stride_width;
+    int32_t dalition_h = params->dilation_height;
+    int32_t dalition_w = params->dilation_width;
+    struct csinn_callback *cb = params->base.cb;
+
+    // check
+    int out_height = (in_h + params->pad_top + params->pad_down - kernel_h) / stride_h + 1;
+    int out_width = (in_w + params->pad_left + params->pad_right - kernel_w) / stride_w + 1;
+    if (out_height != output->dim[2] || out_width != output->dim[3]) {
+        return CSINN_FALSE;
+    }
+
+    if (kernel_h == 1 && kernel_w == 1 && stride_h == 1 && stride_w == 1 && dalition_h == 1 &&
+        dalition_w == 1) {
+        params->conv_extra.conv_mode = CSINN_GEMM;
+        shl_c906_conv1x1s1_sgemm_transform_kernel(kernel, params);
+        cb->exec = shl_c906_conv1x1s1_sgemm_fuse_relu;
+        // winograd convolution condition:
+    } else if (kernel_h == 3 && kernel_w == 3 && stride_h == 1 && stride_w == 1 &&
+               dalition_h == 1 && dalition_w == 1) {
+        if (params->group > 1) {
+            params->conv_extra.conv_mode = CSINN_GEMM;
+            shl_c906_conv_im2col_sgemm_transform_kernel(kernel, params);
+            cb->exec = shl_c906_conv_im2col_sgemm_fuse_relu;
+            return CSINN_TRUE;
+        }
+        // pack4 for winograd convolution
+        if ((out_c % 4 == 0) && (in_c % 4 == 0)) {
+            // zzk @ we have not implement fuse relu for winograd conv yet
+            assert(0);
+            params->conv_extra.conv_mode = CSINN_WINOGRAD;
+            struct csinn_tensor *t_kernel = csinn_alloc_tensor(NULL);
+            shl_c906_conv3x3s1_winograd64_transform_kernel_pack4(kernel, t_kernel);
+            params->conv_extra.kernel_tm = t_kernel;
+            cb->exec = shl_c906_conv3x3s1_winograd64_pack4;
+        } else {
+            params->conv_extra.conv_mode = CSINN_GEMM;
+            shl_c906_conv_im2col_sgemm_transform_kernel(kernel, params);
+            cb->exec = shl_c906_conv_im2col_sgemm_fuse_relu;
+        }
+    } else {
+        params->conv_extra.conv_mode = CSINN_GEMM;
+        shl_c906_conv_im2col_sgemm_transform_kernel(kernel, params);
+        cb->exec = shl_c906_conv_im2col_sgemm_fuse_relu;
+    }
+    return CSINN_TRUE;
+}

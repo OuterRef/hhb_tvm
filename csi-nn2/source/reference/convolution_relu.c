@@ -62,6 +62,7 @@ int shl_ref_depthwise_conv2d_relu_quant(struct csinn_tensor *input, struct csinn
                                         struct csinn_tensor *kernel, struct csinn_tensor *bias,
                                         struct csinn_conv2d_params *params)
 {
+    printf("0.6.\n");
     shl_ref_depthwise_conv2d_quant(input, output, kernel, bias, params);
     struct csinn_relu_params *rp = shl_mem_alloc(sizeof(struct csinn_relu_params));
     memcpy(&(rp->base), &(params->base), sizeof(struct csinn_params_base));

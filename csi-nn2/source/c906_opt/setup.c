@@ -79,9 +79,17 @@ void __attribute__((weak)) shl_target_init_c906()
     shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D, shl_c906_conv2d_init_fp16, NULL);
     shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D, shl_c906_conv2d_init_fp16, NULL);
 #endif
+#ifndef CONFIG_C906_CONVOLUTION_RELU_FP16_DISABLED
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D_RELU, shl_c906_conv2d_relu_init_fp16, NULL);
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D_RELU, shl_c906_conv2d_relu_init_fp16, NULL);
+#endif
 #ifndef CONFIG_C906_CONVOLUTION_FP32_DISABLED
     shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D, shl_c906_conv2d_init_fp32, NULL);
     shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D, shl_c906_conv2d_init_fp32, NULL);
+#endif
+#ifndef CONFIG_C906_CONVOLUTION_RELU_FP32_DISABLED
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D_RELU, shl_c906_conv2d_relu_init_fp32, NULL);
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D_RELU, shl_c906_conv2d_relu_init_fp32, NULL);
 #endif
 #ifndef CONFIG_C906_CONVOLUTION1D_FP16_DISABLED
     shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV1D, shl_c906_conv1d_init_fp16, NULL);
@@ -105,9 +113,17 @@ void __attribute__((weak)) shl_target_init_c906()
     shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D,
                     shl_c906_depthwise_conv2d_init_fp16, NULL);
 #endif
+#ifndef CONFIG_C906_DEPTHWISE_CONVOLUTION_RELU_FP16_DISABLED
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D_RELU,
+                    shl_c906_depthwise_conv2d_relu_init_fp16, NULL);
+#endif
 #ifndef CONFIG_C906_DEPTHWISE_CONVOLUTION_FP32_DISABLED
     shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D,
                     shl_c906_depthwise_conv2d_init_fp32, NULL);
+#endif
+#ifndef CONFIG_C906_DEPTHWISE_CONVOLUTION_RELU_FP32_DISABLED
+    shl_c906_reg_op(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D_RELU,
+                    shl_c906_depthwise_conv2d_relu_init_fp32, NULL);
 #endif
 #ifndef CONFIG_C906_DEPTHWISE_CONVOLUTION1D_FP16_DISABLED
     shl_c906_reg_op(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV1D,
@@ -242,13 +258,19 @@ void __attribute__((weak)) shl_target_init_c906()
     shl_register_runtime_callback(CSINN_C906, shl_gref_runtime_callback);
 #ifndef CONFIG_GRAPH_REFERENCE_CONVOLUTION_DISABLED
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D, shl_gref_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D_RELU, shl_gref_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D, shl_gref_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D_RELU, shl_gref_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_INT8, CSINN_OP_CONV2D, shl_gref_conv2d);
     shl_c906_reg_op_est(CSINN_DTYPE_INT8, CSINN_OP_CONV2D_RELU, shl_gref_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D, shl_gref_group_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D_RELU, shl_gref_group_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D, shl_gref_group_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D_RELU, shl_gref_group_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D, shl_gref_depthwise_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D_RELU, shl_gref_depthwise_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D, shl_gref_depthwise_conv2d);
+    shl_c906_reg_op_est(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D_RELU, shl_gref_depthwise_conv2d_relu);
     shl_c906_reg_op_est(CSINN_DTYPE_INT8, CSINN_OP_DEPTHWISE_CONV2D, shl_gref_depthwise_conv2d);
     shl_c906_reg_op_est(CSINN_DTYPE_INT8, CSINN_OP_DEPTHWISE_CONV2D_RELU,
                         shl_gref_depthwise_conv2d_relu);
@@ -383,8 +405,12 @@ void __attribute__((weak)) shl_target_init_c906()
 #endif
 #endif
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D, shl_c906_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV2D_RELU, shl_c906_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D, shl_c906_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_GROUP_CONV2D_RELU, shl_c906_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D,
+                        shl_c906_depthwise_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_DEPTHWISE_CONV2D_RELU,
                         shl_c906_depthwise_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_CONV1D, shl_c906_conv1d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_MAXPOOL2D, shl_c906_maxpool2d_cap);
@@ -409,8 +435,12 @@ void __attribute__((weak)) shl_target_init_c906()
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT32, CSINN_OP_SUB, shl_c906_sub_cap);
 
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D, shl_c906_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV2D_RELU, shl_c906_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D, shl_c906_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_GROUP_CONV2D_RELU, shl_c906_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D,
+                        shl_c906_depthwise_conv2d_cap);
+    shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_DEPTHWISE_CONV2D_RELU,
                         shl_c906_depthwise_conv2d_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_FULLYCONNECTED, shl_c906_fullyconnected_cap);
     shl_c906_reg_op_cap(CSINN_DTYPE_FLOAT16, CSINN_OP_CONV1D, shl_c906_conv1d_cap);

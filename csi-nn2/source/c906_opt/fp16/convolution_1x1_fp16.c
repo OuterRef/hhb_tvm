@@ -121,6 +121,71 @@ int shl_c906_conv1x1s1_sgemm_fp16(struct csinn_tensor *input, struct csinn_tenso
     return CSINN_TRUE;
 }
 
+int shl_c906_conv1x1s1_sgemm_fp16_fuse_relu(struct csinn_tensor *input, struct csinn_tensor *output,
+                                            struct csinn_tensor *kernel, struct csinn_tensor *bias,
+                                            struct csinn_conv2d_params *params)
+{
+    __fp16 *input_data = (__fp16 *)input->data;
+    __fp16 *output_data = (__fp16 *)output->data;
+    __fp16 *kernel_data = NULL;
+    __fp16 *bias_data = (__fp16 *)bias->data;
+
+    __fp16 *kernel_fp16 = NULL;
+    if (kernel->is_const && kernel->dtype == CSINN_DTYPE_INT8) {
+        // TODO: support per-channel quantization
+        int32_t zp = kernel->qinfo->zero_point;
+        float scale = kernel->qinfo->scale;
+        int size = csinn_tensor_size(kernel);
+        int8_t *kernel_int8 = (int8_t *)kernel->data;
+        kernel_fp16 = (__fp16 *)shl_mem_alloc(size * sizeof(__fp16));
+        shl_rvv_dequantize_i8_to_f16(kernel_int8, kernel_fp16, size, zp, scale);
+        kernel_data = kernel_fp16;
+    } else if (kernel->dtype == CSINN_DTYPE_FLOAT16) {
+        kernel_data = (__fp16 *)kernel->data;
+    } else {
+        shl_debug_error("kernel unsupport dtype: %d\n", kernel->dtype);
+        return CSINN_FALSE;
+    }
+
+    int32_t group = params->group;
+    int32_t batch = input->dim[0];  // assert(batch == 1);
+    int32_t in_ch = input->dim[1];
+    int32_t out_ch = kernel->dim[0];
+    int32_t out_h = output->dim[2];
+    int32_t out_w = output->dim_count == 4 ? output->dim[3] : 1;  // adapt conv1d1s1
+
+    int32_t m = out_ch / group;
+    int32_t k = in_ch / group;
+    int32_t n = out_h * out_w;
+
+    __fp16 *pb_reorder = (__fp16 *)shl_mem_alloc(k * n * sizeof(__fp16));
+
+    for (int i = 0; i < batch; i++) {
+        for (int g = 0; g < group; g++) {
+            __fp16 *pa = kernel_data + g * m * k;
+            __fp16 *pb = pb_reorder;
+            __fp16 *pc = output_data;
+            // pack
+            shl_rvv_reorder_input_z16_fp16(input_data, pb, k, n, n);
+            // shl_c906_reorder_input_fp16_1(input_data, pb, k, n, n);
+            // GEMM
+            shl_rvv_gemm_8x16_fp16_fuse_relu(pc, pa, pb, bias_data + g * m, m, k, n, n);
+            // shl_c906_sgemm_kernel_fp16(pc, pa, pb, m, k, n, n, bias_data + g * m);
+
+            input_data += k * n;
+            output_data += m * n;
+        }
+    }
+
+    shl_mem_free(pb_reorder);
+    if (kernel->is_const && kernel->dtype == CSINN_DTYPE_INT8) {
+        shl_mem_free(kernel_fp16);
+    }
+    // requantize
+    shl_rvv_sidcso_op_requantize_fp16(input, output, kernel);
+    return CSINN_TRUE;
+}
+
 /*
     matrix: input data matrix
     vector: kernel data row
