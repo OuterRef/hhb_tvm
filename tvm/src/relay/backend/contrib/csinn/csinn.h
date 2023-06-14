@@ -614,6 +614,7 @@ class CodegenCSINN : public HHBExprVisitor, public Optimize {
   Expr expr_;
   std::vector<output_element> output_list_;
   bool first_visit_expr{true};
+  bool visited_constantnode{false};
   std::vector<const tvm::relay::CallNode*> real_out;
   /*! \brief The arguments used by a wrapped function that calls CSINN kernels. */
   Array<Var> ext_func_args_;
@@ -632,6 +633,8 @@ class CodegenCSINN : public HHBExprVisitor, public Optimize {
   int alloc_idx_{0};
   int layer_index_{0};
   int params_idx_{0};
+
+  int recent_reuse_idx_{0};
 
   string output_dir_{"."};
 
@@ -677,6 +680,9 @@ class CodegenCSINN : public HHBExprVisitor, public Optimize {
 
   /*! \brief The name of the the constant. */
   std::vector<CSIConstant*> constant_;
+
+  /*! \brief The visited constant node. */
+  std::map<const ConstantNode*, int> visited_constant_;
 
   /* for th1520_aot */
   std::vector<QuantParams> qinfo_list_;

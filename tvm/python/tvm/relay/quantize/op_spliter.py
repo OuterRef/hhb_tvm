@@ -29,7 +29,7 @@ from .. import function
 from ..transform import function_pass
 from .. import transform as _transform
 from ._convert_to_csi import _qnn_attrs
-
+import pdb
 logger = logging.getLogger("HHB")
 
 
@@ -74,11 +74,13 @@ def _split_q_params(q_params, num_group, group_size, left_group, keep_input=True
     return out
 
 
-def split_group(in_data, weight, bias, attr, max_groups, out_shape=None):
+def split_group(in_data, weight_node, bias_node, attr, max_groups, out_shape=None):
     assert attr["data_layout"] == "NCHW", Exception("Only support NCHW layout.")
 
+    weight = weight_node.data.asnumpy()
+    bias = bias_node.data.asnumpy()
     if max_groups >= attr["groups"]:
-        return relay.qnn.op.csi_conv2d(in_data, const(weight), const(bias), **attr)
+        return relay.qnn.op.csi_conv2d(in_data, weight_node, bias_node, **attr)
 
     in_shape = infer_shape(in_data)
     min_in_group = in_shape[1] // attr["groups"]
@@ -183,7 +185,7 @@ class MaxGroupSpliter(ExprMutator):
             weight = op_args[1].data.asnumpy()
             bias = op_args[2].data.asnumpy()
             out_shape = call.checked_type.shape
-            new_call = split_group(in_data, weight, bias, conv_attrs, self.max_groups, out_shape)
+            new_call = split_group(in_data, const(weight), const(bias), conv_attrs, self.max_groups, out_shape)
             new_call.__checked_type__ = call.checked_type
             return new_call
 
@@ -201,13 +203,15 @@ class MaxGroupSpliter(ExprMutator):
         return function.Function(list(new_params), new_body)
 
 
-def split_channel(in_data, weight, bias, attr, max_out_channel, out_shape=None):
+def split_channel(in_data, weight_node, bias_node, attr, max_out_channel, out_shape=None):
     """Split output channel by threshold"""
     assert attr["data_layout"] == "NCHW", Exception("Only support NCHW layout.")
 
+    weight = weight_node.data.asnumpy()
+    bias = bias_node.data.asnumpy()
     w_shape = weight.shape
     if max_out_channel >= w_shape[0]:
-        return relay.qnn.op.csi_conv2d(in_data, const(weight), const(bias), **attr)
+        return relay.qnn.op.csi_conv2d(in_data, weight_node, bias_node, **attr)
 
     num_out = np.floor_divide(w_shape[0], max_out_channel).astype(int)
     left_out = w_shape[0] - num_out * max_out_channel
@@ -281,7 +285,7 @@ class OutChannelSpliter(ExprMutator):
             # for common convolution
             out_shape = infer_shape(call)
             new_call = split_channel(
-                in_data, weight, bias, conv_attrs, self.max_out_channel, out_shape
+                in_data, const(weight), const(bias), conv_attrs, self.max_out_channel, out_shape
             )
             return new_call
 
@@ -310,7 +314,7 @@ def split_kernel_size(in_data, weight, bias, attr, max_kernel_size, weight_byte)
     if max_out_channel >= weight.shape[0]:
         return relay.qnn.op.csi_conv2d(in_data, const(weight), const(bias), **attr)
 
-    return split_channel(in_data, weight, bias, attr, max_out_channel)
+    return split_channel(in_data, const(weight), const(bias), attr, max_out_channel)
 
 
 class KernelSizeSpliter(ExprMutator):
@@ -489,6 +493,8 @@ def split_input_by_max_row(
     base_group = attrs["groups"]
     logger.debug("original conv shape: input=%s s_w_shape=%s", infer_shape(in_data), weight.shape)
     split_params = []
+    weight_node = const(weight)
+    bias_node = const(bias)
     for i, (start_row, end_row) in enumerate(row_index):
         indices = list(range(start_row, end_row + 1))
         if start_row == 0 and end_row + 1 == d_h:
@@ -518,15 +524,16 @@ def split_input_by_max_row(
             attrs["layer_name"] = s_conv_name
             attrs["groups"] = base_group
 
+        # pdb.set_trace()
         if max_out_channel:
             if base_group > 1:
                 raise Exception("Unsupport split group conv by out channel")
             if max_out_channel >= w_shape[0] and logging.DEBUG >= logger.getEffectiveLevel():
                 s_inshape = infer_shape(s_input)
                 split_params.append({"in_shape": s_inshape, "w_shape": weight.shape})
-            s_conv = split_channel(s_input, weight, bias, attrs, max_out_channel)
+            s_conv = split_channel(s_input, weight_node, bias_node, attrs, max_out_channel)
         elif max_groups:
-            s_conv = split_group(s_input, weight, bias, attrs, max_groups)
+            s_conv = split_group(s_input, weight_node, bias_node, attrs, max_groups)
             if max_groups >= attrs["groups"] and logging.DEBUG >= logger.getEffectiveLevel():
                 s_inshape = infer_shape(s_input)
                 split_params.append({"in_shape": s_inshape, "w_shape": weight.shape})
@@ -534,7 +541,7 @@ def split_input_by_max_row(
             if logging.DEBUG >= logger.getEffectiveLevel():
                 s_inshape = infer_shape(s_input)
                 split_params.append({"in_shape": s_inshape, "w_shape": weight.shape})
-            s_conv = relay.qnn.op.csi_conv2d(s_input, const(weight), const(bias), **attrs)
+            s_conv = relay.qnn.op.csi_conv2d(s_input, weight_node, bias_node, **attrs)
 
         concat_tuple.append(s_conv)
     if split_params:
@@ -694,6 +701,11 @@ def split_common_conv2d_input(
     s_out_shape = _infer_shape(s_in_shape, s_w_shape, s_padding, dilation, strides)
     s_out_size = np.prod(s_out_shape) * activation_byte
 
+    print("s_in_size is " + str(s_in_size))
+    print("s_out_size is " + str(s_out_size))
+    print("s_in_shape is " + str(s_in_shape))
+    print("s_out_shape is " + str(s_out_shape))
+
     left_size = sram_size - (s_in_size + s_out_size)
     if contain_weight:
         s_k_size = np.prod(s_w_shape) * weight_byte
@@ -837,6 +849,7 @@ class SramSizeSpliter(ExprMutator):
         super(SramSizeSpliter, self).__init__()
         self.config = config
         self.sram_size = config.h_sram_size
+        # self.sram_size = 16 * 1024
         self.contain_weight = config.h_contain_weight
         self.input_byte = config.nbit_input // 8
         self.activation_byte = config.nbit_input // 8
@@ -899,7 +912,7 @@ class SramSizeSpliter(ExprMutator):
                     logger.debug(
                         "original dw conv shaps: in_shape=%s, w_shape=%s", in_shape, w_shape
                     )
-                    new_call = split_group(in_data, weight, bias, conv_attrs, max_groups)
+                    new_call = split_group(in_data, const(weight), const(bias), conv_attrs, max_groups)
                     new_call.__checked_type__ = call.checked_type
                     return new_call
 
@@ -1000,9 +1013,13 @@ class ConvSpliter:
 
     def __init__(self, crt_config):
         self.max_groups = crt_config.h_max_groups
+        # self.max_groups = 10
         self.max_out_channel = crt_config.h_max_out_channel
+        # self.max_out_channel = 32
         self.max_kernel_size = crt_config.h_max_kernel_size
+        # self.max_kernel_size = 1024 * 32
         self.sram_size = crt_config.h_sram_size
+        # self.sram_size = True
         self.config = crt_config
         self.target = crt_config.target
 
@@ -1023,4 +1040,5 @@ class ConvSpliter:
         if self.sram_size:
             logger.debug("split by sram size: max_sram_size = %s", self.sram_size)
             mod["main"] = SramSizeSpliter(self.config).visit(mod["main"])
+            print(mod)
         return mod["main"]

@@ -1689,11 +1689,13 @@ def Deconv2dToConv2d(mod):
             if call.op.name == "nn.conv2d_transpose":
                 if not call.attrs.data_layout == "NCHW" or not call.attrs.kernel_layout == "OIHW" :
                     return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
-                
+
                 ori_weight = op_args[1].data.asnumpy()
                 b_shape = ori_weight.shape
                 in_shape = relay.frontend.common.infer_shape(pre_call)
-                
+                # We only support batch size 1
+                out_shape = relay.frontend.common.infer_shape(call)
+                assert(out_shape[0] == 1)
                 stride = call.attrs.strides
                 
                 # kernel output channels
@@ -1735,7 +1737,8 @@ def Deconv2dToConv2d(mod):
                 transpose_weight = relay.const(trans_w_array)
                 
                 padding = (int(spilt_row_num / 2), int(spilt_col_num / 2))
-                print (padding)
+                #print (padding)
+
                 out = relay.op.nn.conv2d(
                     op_args[0],
                     transpose_weight,
@@ -1743,14 +1746,14 @@ def Deconv2dToConv2d(mod):
                     padding=padding,
                 )
                 
-                new_shape = [1, original_filter_num, stride_h, stride_w, in_shape[2], in_shape[3]]
+                new_shape = [original_filter_num, stride_h, stride_w, in_shape[2], in_shape[3]]
                 out_shape = [1, original_filter_num, in_shape[2] * stride_h, in_shape[3]* stride_w]
 
                 data = relay.op.transform.reshape(out, new_shape)
                 # The data will be transposed to
                 # [b, oc, h, upscale_factor, w, upscale_factor]
                 # for further reshape
-                axes = [0, 1, 4, 2, 5, 3]
+                axes = [0, 3, 1, 4, 2]
                 data = relay.op.transform.transpose(data, axes)
                 data = relay.op.transform.reshape(data, out_shape)
                 return data

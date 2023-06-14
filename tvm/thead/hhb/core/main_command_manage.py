@@ -19,6 +19,7 @@ import logging
 import os
 import numpy as np
 import tvm
+import tvm.relay as relay
 from tvm.contrib import graph_executor
 from tvm.relay.quantize.quantize_hhb import detect_quantized_model
 
@@ -50,7 +51,6 @@ from .preprocess_manage import (
 )
 from .codegen_manage import collect_codegen_config, set_codegen_config
 from .simulate_manage import inference_model, inference_elf
-
 
 LOG = 25
 logger = logging.getLogger("HHB")
@@ -120,6 +120,9 @@ def driver_main_command(args_filter: ArgumentFilter):
     mod, params = import_model(
         args.model_file, args.model_format, args.input_name, args.input_shape, args.output_name
     )
+    # print(mod)
+    # mod = relay.transform.Deconv2dToConv2d(mod)
+    # print(mod)
 
     if args.reorder_pixel_format:
         mod, params = reorder_pixel_format(mod, params)
