@@ -667,7 +667,7 @@ def quantize_hhb(module, params=None, dataset=None, target="x86_ref"):
 
     logger.debug("Start specify name for constant node.")
     csi_module = relay.transform.InferType()(csi_module)
-    csi_module = rename_constant(csi_module)
+    #csi_module = rename_constant(csi_module)
     logger.debug("specify name for constant node completed!")
 
     logger.debug("Start specify name for call node.")

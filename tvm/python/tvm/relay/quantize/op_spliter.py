@@ -1040,5 +1040,4 @@ class ConvSpliter:
         if self.sram_size:
             logger.debug("split by sram size: max_sram_size = %s", self.sram_size)
             mod["main"] = SramSizeSpliter(self.config).visit(mod["main"])
-            print(mod)
         return mod["main"]

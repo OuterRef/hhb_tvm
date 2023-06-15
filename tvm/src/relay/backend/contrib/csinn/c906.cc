@@ -109,10 +109,16 @@ void CodegenC906::Conv2d(const CallNode* call, string op_name) {
   CHECK(constant_.size() == 1) << "Every args expects a single constant_";
 
   auto kernel = constant_[0];
-  string kernel_name = "kernel_" + to_string(buf_idx_);
+  string kernel_name;
 
   auto kernel_qinfo = GetCallOPQuant(call, 1);
-  CreateConstantTensor(op, kernel, kernel_name, wshape, kernel_qinfo, depthwise_kernel);
+
+  if (visited_constantnode) {
+    kernel_name = "kernel_" + to_string(recent_reuse_idx_);
+  } else {
+    kernel_name = "kernel_" + to_string(buf_idx_);
+    CreateConstantTensor(op, kernel, kernel_name, wshape, kernel_qinfo, depthwise_kernel);
+  }
 
   bool gemm_kernel = is_gemm_kernel(depthwise_kernel, op);
 
@@ -128,10 +134,16 @@ void CodegenC906::Conv2d(const CallNode* call, string op_name) {
   CHECK(constant_.size() == 1) << "Every args expects a single constant_";
 
   auto bias = constant_[0];
-  string bias_name = "bias_" + to_string(buf_idx_);
+  string bias_name;
   bool fuse_zp = false;
-  CreateBiasTensor(op, call, bias, bias_name, attr->q_params, &fuse_zp,
-                   depthwise_kernel ? "depthwise_bias" : "conv_bias");
+
+  if (visited_constantnode) {
+    bias_name = "bias_" + to_string(recent_reuse_idx_);
+  } else {
+    bias_name = "bias_" + to_string(buf_idx_);
+    CreateBiasTensor(op, call, bias, bias_name, attr->q_params, &fuse_zp,
+                    depthwise_kernel ? "depthwise_bias" : "conv_bias");
+  }
   decl << ", " << bias_name;
 
   output2params[output_name] = complete_name;
@@ -207,14 +219,20 @@ void CodegenC906::Dense(const CallNode* call) {
   auto kernel = constant_[0];
   auto wshape = call->args[1]->get_shape();
 
-  string kernel_name = "kernel_" + to_string(buf_idx_);
+  string kernel_name;
   auto kernel_qinfo = GetCallOPQuant(call, 1);
   // CreateConstantTensor(op, kernel, kernel_name, wshape, kernel_qinfo);
-  if (cfg->quantization_scheme == "CSINN_QUANT_FLOAT16_W_INT8") {
-    kernel_qinfo->dtype = "int8_t";
-    CreateWeightTensor(op, kernel, kernel_name, wshape, kernel_qinfo);
+
+  if (visited_constantnode) {
+    kernel_name = "kernel_" + to_string(recent_reuse_idx_);
   } else {
-    CreateConstantTensor(op, kernel, kernel_name, wshape, kernel_qinfo);
+    kernel_name = "kernel_" + to_string(buf_idx_);
+    if (cfg->quantization_scheme == "CSINN_QUANT_FLOAT16_W_INT8") {
+      kernel_qinfo->dtype = "int8_t";
+      CreateWeightTensor(op, kernel, kernel_name, wshape, kernel_qinfo);
+    } else {
+      CreateConstantTensor(op, kernel, kernel_name, wshape, kernel_qinfo);
+    }
   }
 
   CSINNConstantTensor* ct = op->get_constant(0);
@@ -232,7 +250,12 @@ void CodegenC906::Dense(const CallNode* call) {
   string bias_name = "bias_" + to_string(buf_idx_);
   bool fuse_zp = false;
 
-  CreateBiasTensor(op, call, bias, bias_name, dense_attr->q_params, &fuse_zp, "dense_bias");
+  if (visited_constantnode) {
+    bias_name = "bias_" + to_string(recent_reuse_idx_);
+  } else {
+    bias_name = "bias_" + to_string(buf_idx_);
+    CreateBiasTensor(op, call, bias, bias_name, dense_attr->q_params, &fuse_zp, "dense_bias");
+  }
 
   decl << ", " << bias_name;
 

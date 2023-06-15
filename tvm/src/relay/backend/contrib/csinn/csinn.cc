@@ -79,13 +79,18 @@ void CodegenCSINN::visit_expr(const VarNode* node) {
 void CodegenCSINN::visit(const Expr& expr) {
   auto it = visit_counter_.find(expr.get());
   if (it != visit_counter_.end()) {
+    // if (auto const_node = expr.as<ConstantNode>()) {
+    //   constant_.clear();
+    //   CSIConstant* constant =
+    //       new CSIConstant(GetDtypeString(const_node->data.DataType()), const_node->get_shape());
+    //   constant->set_name("constant_" + to_string(const_idx_++));
+    //   const_node->data.CopyToBytes(constant->get_data_buf(), constant->byte_size());
+    //   constant_.push_back(constant);
+    // }
     if (auto const_node = expr.as<ConstantNode>()) {
-      constant_.clear();
-      CSIConstant* constant =
-          new CSIConstant(GetDtypeString(const_node->data.DataType()), const_node->get_shape());
-      constant->set_name("constant_" + to_string(const_idx_++));
-      const_node->data.CopyToBytes(constant->get_data_buf(), constant->byte_size());
-      constant_.push_back(constant);
+      assert(visited_constant_.count(const_node));
+      visited_constantnode = true;
+      recent_reuse_idx_ = visited_constant_[const_node];
     }
     ++it->second;
   } else {
