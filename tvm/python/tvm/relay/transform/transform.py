@@ -19,6 +19,8 @@
 """
 Relay pass transformation infrastructure.
 """
+from collections import defaultdict
+
 import functools
 import inspect
 import types
@@ -1597,82 +1599,6 @@ def InlineCompilerFunctionsBoundTo(global_vars):
 
 #     return decorator
 
-
-def LayerGroupTiling(mod):
-    class LayerGroupTilingClass(relay.ExprMutator):
-        """Convert qnn model to relay"""
-
-        def __init__(self):
-            super(LayerGroupTilingClass, self).__init__()
-        
-        def visit_call(self, call):
-            call_list = []
-            fuse_num = 0
-            current_call = call
-            call_list.append(current_call)
-            print("add")
-            current_arg = call.args
-            
-            fuse_num = fuse_num + 1
-            # Todo:遍历到网络输入时.前面的算子需要不存在分支
-            print(call.op.name)
-            while (fuse_num < 3 ) :
-                print(fuse_num)
-                print("\n")
-                current_call = current_arg[0]
-                
-                # Todo: if (符合要求):
-                fuse_num = fuse_num + 1
-                call_list.append(current_call)
-                print("add")
-                current_arg = current_call.args
-            
-            op_args = [self.visit(arg) for arg in current_call.args]
-            # 确定tilingshape
-            tile_num = 2
-            split_dim = 3
-            # 对各层进行tiling
-            group_out = []
-            input_tile = []
-            
-            slice_0 = relay.op.strided_slice(data = op_args[0], begin = [0], end = [4], axes = [split_dim])
-            input_tile.append(slice_0)
-            slice_1 = relay.op.strided_slice(data = op_args[0], begin = [4], end = [8], axes = [split_dim])
-            input_tile.append(slice_1)
-            
-            group_out.append(input_tile)
-            
-            fuse_index = fuse_num
-            while fuse_index > 0:
-                op_out = []
-                fuse_index = fuse_index - 1
-                current_call = call_list[0]
-                
-                pre_op_out = group_out[fuse_num - 1 - fuse_index]
-                
-                for i in range(tile_num):
-                    pre_tile_out = pre_op_out[i]
-                    print("*********************************************************")
-                    print(pre_tile_out)
-                    
-                    print("*********************************************************")
-                    #new_op = relay.quantize._forward_op(current_call, [pre_tile_out])
-                    new_op = relay.op.nn.relu(pre_tile_out)
-                    print("*********************************************************")
-                    op_out.append(new_op)
-                print("*********************************************************")        
-                group_out.append(op_out)
-            print("***************************split_dim******************************")
-            new_call =  relay.op.concatenate(group_out[fuse_num], split_dim)
-            print("***************************concatenate******************************")
-            # op_args = [self.visit(arg) for arg in call.args]
-            # new_call = relay.nn.relu(op_args[0])
-            
-            return new_call
-    mod["main"] = LayerGroupTilingClass().visit(mod["main"])
-
-    return mod
-
 def Deconv2dToConv2d(mod):
     class Deconv2dToConv2dClass(relay.ExprMutator):
         """Convert qnn model to relay"""
@@ -1764,3 +1690,579 @@ def Deconv2dToConv2d(mod):
     mod["main"] = Deconv2dToConv2dClass().visit(mod["main"])
 
     return mod
+
+def LayerGroupTiling(mod, sram_size, element_size):
+    class LookUpClass(relay.ExprVisitor):
+        """Traverses the graph to determine consumers. The result is maintained in `consumers_list`.
+
+        Attributes
+        ----------
+        consumers_list : Dict[tvm.relay.expr.Call, List[int]]
+            Mapping from NPU operation to list of boolean values that represent
+            whether or not each consumer is an NPU operation.
+        
+        """
+        def __init__(self):
+            self.consumers_list = defaultdict(list)
+            super().__init__()
+
+        def visit_call(self, call: relay.Call):
+            args = []
+            # Expand tuples
+            for arg in call.args:
+                if isinstance(arg, relay.Tuple):
+                    args.extend(arg.fields)
+                else:
+                    args.append(arg)
+
+            for arg in args:
+                if isinstance(arg, relay.Call) :
+                    self.consumers_list[arg].append(1)
+                    
+            super().visit_call(call)
+            
+    class LayerGroupTilingClass(relay.ExprMutator):
+        """Convert qnn model to relay"""
+
+        def __init__(self, consumers_list, sram_size, element_size):
+            self._consumers_list = consumers_list
+            self._sram_size = sram_size
+            self._element_size = element_size
+            self.target = [
+                "nn.relu",
+                "nn.conv2d",
+                "nn.bias_add",
+            ]
+            self.complex_ops = [
+                "nn.conv2d",
+            ]
+            
+            super(LayerGroupTilingClass, self).__init__()
+        
+        def visit_call(self, call):
+            # print("*******************************************************************************")
+            call_list = []
+            temp_list = []
+            can_fuse = True
+            first_op = False
+            fuse_num = 0
+            temp_num = 0
+            conv_num = 0
+            tile_num = 0
+            tile_dim = "h"
+            tile_pos = []
+            current_call = call
+            current_arg = call.args
+            pre_call = current_arg[0]
+            
+
+            if not current_call.op.name in self.target:
+                op_args = [self.visit(arg) for arg in current_call.args]
+                return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
+
+            first_op = isinstance(pre_call, relay.Var)
+            
+            temp_num = temp_num + 1
+            temp_list.append(current_call)
+            
+            out_shape = relay.frontend.common.infer_shape(current_call)
+            oh = out_shape[2]
+            # Todo：只支持NCHW
+            assert(len(out_shape) == 4)
+            for i in range(oh):
+                tile_pos.append([i, i+1])
+            can_fuse, tile_pos = self.TryToTilingGroup(current_call, tile_dim, tile_pos)
+            
+            if current_call.op.name in self.complex_ops and can_fuse:
+                conv_num = conv_num + 1
+                call_list.extend(temp_list)
+                fuse_num = fuse_num + temp_num
+                temp_list = []
+                temp_num = 0
+            
+            if can_fuse and not first_op:
+                if not pre_call.op.name in self.target:
+                    call_list.extend(temp_list)
+                    fuse_num = fuse_num + temp_num
+                    temp_list = []
+                    temp_num = 0
+                    
+            # print(current_call.op.name)
+            # if not first_op:
+            #     print(pre_call.op.name)
+            # print(fuse_num)
+            # print("***************intoloop")
+            #TODO 从下向上遍历计算图，在支持h维度切分的情况下，第一个算子与之后每一个算子必须在target列表中（为了避开多输入算子，后续可以使用输入类型检查进一步细化），同时后续算子的输出只能有一个consumer（第一个算子的输出可以有多个consumer）
+            if not first_op:
+                # print("***************intoloop")
+                while (conv_num < 3 and pre_call.op.name in self.target and current_call.op.name in self.target
+                    and len(self._consumers_list[pre_call]) == 1
+                    and can_fuse and tile_dim == "h") :
+                    # print("***************intoloop")
+                    current_call = pre_call
+                    # Todo: if (符合要求):
+                    temp_num = temp_num + 1
+                    temp_list.append(current_call)
+
+                    current_arg = current_call.args
+                    pre_call = current_arg[0]
+
+                    # print(current_call.op.name)
+                    can_fuse, tile_pos = self.TryToTilingGroup(current_call, tile_dim, tile_pos)
+                    
+                    if current_call.op.name in self.complex_ops and can_fuse:
+                        conv_num = conv_num + 1
+                        call_list.extend(temp_list)
+                        fuse_num = fuse_num + temp_num
+                        temp_num = 0
+                        temp_list = []
+                        
+                    first_op = isinstance(pre_call, relay.Var)
+                    if first_op:
+                        break
+                    
+                    if not pre_call.op.name in self.target and can_fuse:
+                        call_list.extend(temp_list)
+                        fuse_num = fuse_num + temp_num
+                        temp_list = []
+                        temp_num = 0
+            # print(can_fuse)
+            # print(conv_num)
+            if not can_fuse:
+                if conv_num == 0:
+                    tile_dim = "oc"
+                    call_list.extend(temp_list)
+                    fuse_num = fuse_num + temp_num
+                    temp_num = 0
+                    temp_list = []
+                    if call_list[fuse_num - 1].op.name in self.complex_ops:
+                        conv_num = conv_num + 1
+                # elif conv_num == 1:
+                #     tile_dim = "oc"
+                #     temp_num = 0
+                #     temp_list = []
+                    
+
+            if first_op:
+                call_list.extend(temp_list)
+                fuse_num = fuse_num + temp_num
+                temp_num = 0
+                temp_list = []
+
+            # print(fuse_num)
+            current_call = call_list[fuse_num - 1]
+            
+            # print(fuse_num)
+            # print(len(call_list))
+            # print(tile_dim)
+            # print(call_list[0])
+            op_args = [self.visit(arg) for arg in current_call.args]
+            # print("***************************************start tiling****************************************")
+            # 确定tilingshape
+            tile_dim_num = 2 if tile_dim == "h" else 1
+            
+            can_fuse = False
+            # print(tile_dim)
+            
+            while not can_fuse :
+                tile_num = tile_num + 1
+                tile_pos = []
+                pos_sum = 0
+                for i in range(tile_num):
+                    tile_len = (out_shape[tile_dim_num] + i) // tile_num
+                    tile_pos.append([pos_sum, pos_sum + tile_len])
+                    pos_sum = pos_sum + tile_len
+                
+                for i in range(fuse_num):
+                    can_fuse, tile_pos = self.TryToTilingGroup(call_list[i], tile_dim, tile_pos)
+                    if not can_fuse:
+                        break
+            # print("***************get shape")
+            # print(tile_pos)
+            # print(tile_dim)
+            # print(fuse_num)
+            # print(conv_num)
+            
+            # 对各层进行tiling
+            group_out = []
+            first_input_tile_list = []
+            first_input_tile_list = self.TileInput(call_list[fuse_num - 1], op_args[0], tile_num, tile_dim, tile_pos)
+            group_out.append(first_input_tile_list)
+            
+            for i in range(fuse_num):
+                input_tile_list = group_out[i]
+                current_call = call_list[fuse_num - 1 - i]
+                output_tile_list = self.GetOutputTile(current_call, tile_dim, input_tile_list, tile_pos)
+                group_out.append(output_tile_list)
+            
+            for tile_output_call in group_out[fuse_num]:
+                newtileshape = relay.frontend.common.infer_shape(tile_output_call)
+                # print("newtileshape")
+                # print(newtileshape)
+            
+            if tile_num == 1:
+                new_call =  group_out[fuse_num][0]
+            else:
+                new_call =  relay.op.concatenate(group_out[fuse_num], tile_dim_num)
+            newcallshape = relay.frontend.common.infer_shape(new_call)
+            
+            # print("newcallshape")
+            # print(newcallshape)
+            # op_args = [self.visit(arg) for arg in call.args]
+            # new_call = relay.nn.relu(op_args[0])
+            
+            return new_call
+        
+        # 从输出tile形状推断输入tile形状，目前只支持单维度拆分
+        def TryToTilingGroup(self, call, tile_dim, tile_pos):
+            can_fuse = False
+            input_tile_pos_list = []
+            out_shape = relay.frontend.common.infer_shape(call)
+            max_tile_size = 0
+            
+            if call.op.name == "nn.relu":
+                input_tile_pos_list = tile_pos
+
+                for output_tile_pos in tile_pos:
+                    tile_len = output_tile_pos[1] - output_tile_pos[0]
+                    if tile_dim == "h":
+                        required_size = out_shape[0] * out_shape[1] * out_shape[3] * tile_len * 2 * self._element_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                    elif tile_dim == "oc":
+                        required_size = out_shape[0] * out_shape[2] * out_shape[3] * tile_len * 2 * self._element_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                        
+            if call.op.name == "nn.conv2d":
+                attrs = call.attrs
+                padding = attrs["padding"]
+                strides = attrs["strides"]
+                dilation = attrs["dilation"]
+                groups = attrs["groups"]
+                weight = call.args[1].data.asnumpy()
+                w_shape = weight.shape
+                w_h = w_shape[2]
+                in_shape = relay.frontend.common.infer_shape(call.args[0])
+                
+                assert(dilation[1] == 1 and dilation[0] == 1)
+                
+                is_depthwise = False
+                is_group = False
+                if groups > 1:
+                    if groups == w_shape[0] == in_shape[1]:
+                        is_depthwise = True
+                    else :
+                        is_group = True
+                        assert(not is_group)
+                
+                for output_tile_pos in tile_pos:
+                    input_tile_pos = []
+                    if tile_dim == "h":
+                        # if is_depthwise:
+                        #     return False, input_tile_pos_list
+                        start = output_tile_pos[0] * strides[1] - padding[0] if (output_tile_pos[0] * strides[1] - padding[0]) > 0 else 0
+                        end = (output_tile_pos[1] - 1) * strides[1] + w_h - padding[0] if ((output_tile_pos[1] - 1) * strides[1] + w_h - padding[0]) < in_shape[2] else in_shape[2]
+                        input_tile_pos = [start, end]
+                        input_tile_pos_list.append(input_tile_pos)
+                        
+                        out_size = out_shape[0] * out_shape[1] * out_shape[3] * (output_tile_pos[1] - output_tile_pos[0]) * self._element_size
+                        in_size = in_shape[0] * in_shape[1] * in_shape[3] * (end - start) * self._element_size
+                        w_size = w_shape[0] * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
+                        
+                        required_size = out_size + in_size + w_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                        # print("********************")
+                        # print(output_tile_pos)
+                        # print(end)
+                        # print(start)
+                        # print(required_size)
+                        # print(out_size)
+                        # print(in_size)
+                        # print(w_size)
+                        # print(w_shape)
+                    if tile_dim == "oc":
+                        if is_depthwise:
+                            out_size = out_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * out_shape[2] * out_shape[3] * self._element_size
+                            in_size = in_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * in_shape[2] * in_shape[3] * self._element_size
+                            w_size = (output_tile_pos[1] - output_tile_pos[0]) * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
+                            required_size = out_size + in_size + w_size
+                            max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                            #若为oc切割，则将oc的排布输出出去
+                            input_tile_pos = output_tile_pos
+                            input_tile_pos_list.append(input_tile_pos)
+                        else:
+                            out_size = out_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * out_shape[2] * out_shape[3] * self._element_size
+                            in_size = in_shape[0] * in_shape[1] * in_shape[2] * in_shape[3] * self._element_size
+                            w_size = (output_tile_pos[1] - output_tile_pos[0]) * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
+                            required_size = out_size + in_size + w_size
+                            max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                            #若为oc切割，则将oc的排布输出出去
+                            input_tile_pos = output_tile_pos
+                            input_tile_pos_list.append(input_tile_pos)
+                        
+                        # print("********************")
+                        # print(output_tile_pos)
+                        # print(required_size)
+                        # print(out_size)
+                        # print(in_size)
+                        # print(w_size)
+                        # print(w_shape)
+            
+            if call.op.name == "nn.bias_add":
+                bias = call.args[1].data.asnumpy()
+                b_shape = bias.shape
+                assert(len(b_shape) == 1)
+                input_tile_pos_list = tile_pos
+
+                for output_tile_pos in tile_pos:
+                    tile_len = output_tile_pos[1] - output_tile_pos[0]
+                    if tile_dim == "h":
+                        b_size = b_shape[0] * self._element_size
+                        required_size = out_shape[0] * out_shape[1] * out_shape[3] * tile_len * 2 * self._element_size + b_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                    elif tile_dim == "oc":
+                        b_size = (output_tile_pos[1] - output_tile_pos[0]) * self._element_size
+                        required_size = out_shape[0] * out_shape[2] * out_shape[3] * tile_len * 2 * self._element_size + b_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                
+            if max_tile_size <= self._sram_size:
+                can_fuse = True
+            
+            return can_fuse, input_tile_pos_list
+        
+        def TileInput(self, first_call, input, tile_num, tile_dim, tile_pos):
+            input_tile_list = []
+            if tile_num == 1:
+                input_tile_list.append(input)
+                return input_tile_list
+            
+            if first_call.op.name == "nn.relu":
+                tile_dim_num = 0
+                if tile_dim == "h":
+                    tile_dim_num = 2
+                elif tile_dim == "oc":
+                    tile_dim_num = 1
+                    
+                for i in range(tile_num):
+                    current_tile_size = tile_pos[i]
+                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                    input_tile_list.append(slice)
+            
+            if first_call.op.name == "nn.conv2d":
+                attrs = tiling_get_attrs(first_call.attrs)
+                groups = attrs["groups"]
+                weight = first_call.args[1].data.asnumpy()
+                w_shape = weight.shape
+                in_shape = relay.frontend.common.infer_shape(first_call.args[0])
+                
+                is_depthwise = False
+                is_group = False
+                if groups > 1:
+                    if groups == w_shape[0] == in_shape[1]:
+                        is_depthwise = True
+                    else :
+                        is_group = True
+                        assert(not is_group)
+                
+                if tile_dim == "oc" :
+                    if is_depthwise:
+                        tile_dim_num = 1
+                        for i in range(tile_num):
+                            current_tile_size = tile_pos[i]
+                            slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                            input_tile_list.append(slice)
+                    else:
+                        for i in range(tile_num):
+                            input_tile_list.append(input)
+                elif tile_dim == "h":
+                    tile_dim_num = 2
+                    for i in range(tile_num):
+                        current_tile_size = tile_pos[i]
+                        slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                        input_tile_list.append(slice)    
+                
+            if first_call.op.name == "nn.bias_add":
+                tile_dim_num = 0
+                if tile_dim == "h":
+                    tile_dim_num = 2
+                elif tile_dim == "oc":
+                    tile_dim_num = 1
+                    
+                for i in range(tile_num):
+                    current_tile_size = tile_pos[i]
+                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                    input_tile_list.append(slice)
+                    
+            return input_tile_list
+        # 由前一个算子的call_list，向下传递
+        def GetOutputTile(self, call, tile_dim, input_tile_list, tile_pos):
+            output_tile_list = []
+            
+            if call.op.name == "nn.relu":
+                for tile_input in input_tile_list:
+                    tile_output = relay.expr.Call(call.op, [tile_input], call.attrs, call.type_args, call.span)
+                    output_tile_list.append(tile_output)
+                    
+            if call.op.name == "nn.conv2d":
+                attrs = tiling_get_attrs(call.attrs)
+                # Array<IndexExpr> strides;
+                # Array<IndexExpr> padding;
+                # Array<IndexExpr> dilation;
+                # int groups;
+                # IndexExpr channels;
+                # Array<IndexExpr> kernel_size;
+                # tvm::String data_layout;
+                # tvm::String kernel_layout;
+                # tvm::String out_layout;
+                # tvm::String auto_scheduler_rewritten_layout;   // The layout after auto-scheduler's layout rewrite
+                # Array<PrimExpr> meta_schedule_original_shape;  // The original shape of the weights
+                # DataType out_dtype;
+                padding = attrs["padding"]
+                strides = attrs["strides"]
+                dilation = attrs["dilation"]
+                groups = attrs["groups"]
+                channels = attrs["channels"]
+                kernel_size = attrs["kernel_size"]
+                data_layout = attrs["data_layout"]
+                kernel_layout = attrs["kernel_layout"]
+                out_layout = attrs["out_layout"]
+                out_dtype = attrs["out_dtype"]
+                assert(strides[1] >= padding[0] and strides[1] >= padding[2])
+                weight = call.args[1].data.asnumpy()
+                w_shape = weight.shape
+                
+                in_shape = relay.frontend.common.infer_shape(call.args[0])
+                
+                is_depthwise = False
+                is_group = False
+                if groups > 1:
+                    if groups == w_shape[0] == in_shape[1]:
+                        is_depthwise = True
+                    else :
+                        is_group = True
+                        assert(not is_group)
+                
+                tile_index = 0
+                for tile_input in input_tile_list:
+                    if tile_dim == "h":
+                        s_w_expr = relay.const(weight)
+                        if tile_index == 0 and not tile_index == len(input_tile_list) - 1:
+                            new_padding = [padding[0], padding[1], 0, padding[3]]
+                        elif tile_index == len(input_tile_list) - 1 and not tile_index == 0 :
+                            new_padding = [0, padding[1], padding[2], padding[3]]
+                        elif tile_index == len(input_tile_list) - 1 and tile_index == 0 :
+                            new_padding = [padding[0], padding[1], padding[2], padding[3]]
+                        else:
+                            new_padding = [0, padding[1], 0, padding[3]]
+                        
+                        tile_output = relay.op.nn.conv2d(
+                            tile_input, 
+                            s_w_expr, 
+                            padding = new_padding,
+                            strides = strides,
+                            dilation = dilation,
+                            groups = groups,
+                            channels = channels,
+                            kernel_size = kernel_size,
+                            data_layout = data_layout,
+                            kernel_layout = kernel_layout,
+                            out_layout = out_layout,
+                            out_dtype = out_dtype
+                        )
+                        output_tile_list.append(tile_output)
+                        
+                    if tile_dim == "oc":
+                        # inshape = relay.frontend.common.infer_shape(tile_input)
+                        # print("inshape")
+                        # print(inshape)
+                        
+                        channel_pos = tile_pos[tile_index]
+                        s_weight = weight[channel_pos[0] : channel_pos[1], :, :, :]
+                        s_weight_shape = s_weight.shape
+                        s_w_expr = relay.const(s_weight)
+                        
+                        channels = channel_pos[1] - channel_pos[0]
+                        if is_depthwise:
+                            groups = channels
+                            
+                        tile_output = relay.op.nn.conv2d(
+                            tile_input, 
+                            s_w_expr, 
+                            padding = padding,
+                            strides = strides,
+                            dilation = dilation,
+                            groups = groups,
+                            channels = channels,
+                            kernel_size = kernel_size,
+                            data_layout = data_layout,
+                            kernel_layout = kernel_layout,
+                            out_layout = out_layout,
+                            out_dtype = out_dtype
+                        )
+                        output_tile_list.append(tile_output)
+                        
+                    tile_index = tile_index + 1
+                    
+            if call.op.name == "nn.bias_add":
+                attrs = call.attrs
+                bias = call.args[1].data.asnumpy()
+                tile_index = 0
+                for tile_input in input_tile_list:
+                    inshape = relay.frontend.common.infer_shape(tile_input)
+                    if tile_dim == "h":
+                        # b_shape = bias.shape
+                        # s_bias = bias.reshape(1, b_shape[0], 1, 1)
+                        # s_bias = np.broadcast_to(s_bias, (1, b_shape[0], inshape[2], inshape[3]))
+                        # s_b_expr = relay.const(s_bias)
+                        # tile_output = relay.op.add(tile_input, s_b_expr)
+                        
+                        tile_output = relay.op.nn.bias_add(tile_input, call.args[1])
+                        # tile_output = relay.expr.Call(call.op, [tile_input, call.args[1]], call.attrs, call.type_args, call.span)
+                        output_tile_list.append(tile_output)
+                    if tile_dim == "oc":
+                        # channel_pos = tile_pos[tile_index]
+                        # s_bias = bias[channel_pos[0] : channel_pos[1]]
+                        # b_shape = s_bias.shape
+                        # s_bias = s_bias.reshape(1, b_shape[0], 1, 1)
+                        # s_bias = np.broadcast_to(s_bias, (1, b_shape[0], inshape[2], inshape[3]))
+                        # s_b_expr = relay.const(s_bias)
+                        # tile_output = relay.op.add(tile_input, s_b_expr)
+                        
+                        
+                        channel_pos = tile_pos[tile_index]
+                        s_bias = bias[channel_pos[0] : channel_pos[1]]
+                        s_b_expr = relay.const(s_bias)
+                        tile_output = relay.op.nn.bias_add(tile_input, s_b_expr)
+                        
+                        output_tile_list.append(tile_output)
+                        
+                    tile_index = tile_index + 1
+                
+            return output_tile_list
+    
+    lookup = LookUpClass()
+    lookup.visit(mod["main"])
+    
+    mod["main"] = LayerGroupTilingClass(lookup.consumers_list, sram_size, element_size).visit(mod["main"])
+
+    return mod
+
+
+
+def tiling_get_attrs(attrs):
+    ret = {}
+    for i in dir(attrs):
+    
+        ret[i] = getattr(attrs, i)
+        if isinstance(ret[i], tvm.ir.container.Array):
+            ret[i] = tiling_get_array_value(ret[i])
+
+    return ret
+
+def tiling_get_array_value(data):
+    out = []
+    for x in data:
+        if isinstance(x, tvm.ir.container.Array):
+            out.append(tiling_get_array_value(x))
+        else:
+            out.append(x.value)
+    return out

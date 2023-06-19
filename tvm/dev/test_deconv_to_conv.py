@@ -13,9 +13,9 @@ from tvm.contrib import graph_executor
 
 op_name = "conv_unit_test" # the name of save_dir and txt
 dtype = "float32"   # the Tensor data type
-data_shape = (1, 3, 4, 4)  # the Tensor data shape
-weight_shape = (4, 3, 2, 2)  # the Tensor weight shape
-bias_shape = (1,)
+data_shape = (1, 32, 256, 256)  # the Tensor data shape
+weight_shape = (16, 32, 2, 2)  # the Tensor weight shape
+# bias_shape = (64,)
 have_weight = True
 have_bias = True
 per_channel = True
@@ -35,7 +35,7 @@ nbit_weight = 8
 do_simulation = False
 
 #setup data
-np_data = tvm.nd.array(np.random.rand(1, 3, 4, 4).astype(dtype))
+np_data = tvm.nd.array(np.random.rand(1, 32, 256, 256).astype(dtype))
 # np.random.uniform(-1, 1, data_shape)
 # np_data = np.ones((1, 3, 224, 224))
 # np_weight = tvm.nd.array(np.random.uniform(-1, 1, weight_shape).astype(dtype))
@@ -44,7 +44,7 @@ print("input")
 print(np_data)
 
 # np_weight = np.ones(weight_shape).astype(dtype)
-np_weight = tvm.nd.array(np.random.rand(4, 3, 2, 2).astype(dtype))
+np_weight = tvm.nd.array(np.random.rand(16, 32, 2, 2).astype(dtype))
 print("weight")
 print(np_weight)
 params = {
@@ -185,6 +185,8 @@ compiled_module.run()
 network_output = compiled_module.get_output(0).numpy()
 print("ori output")
 print(network_output)
+print("ori output shape")
+print(network_output.shape)
 
 
 mod_t = relay.transform.Deconv2dToConv2d(mod_original)
@@ -207,6 +209,8 @@ compiled_module1.run()
 network_output1 = compiled_module1.get_output(0).numpy()
 print("network_output1")
 print(network_output1)
+print("network_output1 shape")
+print(network_output1.shape)
 
 if (network_output1.all() == network_output.all()):
     print("allsame")

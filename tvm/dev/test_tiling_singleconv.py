@@ -13,9 +13,9 @@ from tvm.contrib import graph_executor
 
 op_name = "conv_unit_test" # the name of save_dir and txt
 dtype = "float32"   # the Tensor data type
-data_shape = (1, 1, 1, 8)  # the Tensor data shape
-weight_shape = (1, 3, 3, 3)  # the Tensor weight shape
-bias_shape = (1,)
+data_shape = (1, 512, 14, 14)  # the Tensor data shape
+weight_shape = (512, 512, 1, 1)  # the Tensor weight shape
+bias_shape = (512,)
 have_weight = True
 have_bias = True
 per_channel = True
@@ -35,7 +35,7 @@ nbit_weight = 8
 do_simulation = False
 
 #setup data
-np_data = tvm.nd.array(np.random.rand(1, 1, 1, 8).astype(dtype))
+np_data = tvm.nd.array(np.random.rand(1, 512, 14, 14).astype(dtype))
 # np.random.uniform(-1, 1, data_shape)
 # np_data = np.ones((1, 3, 224, 224))
 # np_weight = tvm.nd.array(np.random.uniform(-1, 1, weight_shape).astype(dtype))
@@ -45,8 +45,9 @@ print(np_data)
 
 np_weight = tvm.nd.array(np.ones(weight_shape).astype(dtype))
 
+np_bias = tvm.nd.array(np.ones(bias_shape).astype(dtype))
+
 params = {
-        "weight": np_weight,
 }
 
 
@@ -57,46 +58,55 @@ if not os.path.exists(savepath):
 savepath = savepath + "/"
 
 # create the op net
-# def simplenet():    
-
-#     kernel_size = (3, 3)
-#     strides = (1, 1)
-#     padding = (0, 0)
-#     channels = 1
-#     dilation = 1
-
-#     data = relay.var("data", shape=data_shape, dtype=dtype)
-#     weight = relay.var("weight",dtype=dtype)
-
-
-#     op = relay.nn.conv2d(
-#             data=data,
-#             weight=weight,
-#             channels=channels,
-#             kernel_size=kernel_size,
-#             strides=strides,
-#             padding=padding,
-#             data_layout='NCHW')
-
-#     # save the infp to txt
-#     return op
-
 def simplenet():    
 
-    data = relay.var("data", shape=data_shape, dtype=dtype)
+    kernel_size = (1, 1)
+    strides = (1, 1)
+    padding = (0, 0, 0,0 )
+    channels = 512
+    dilation = (1,1)
 
-    op0 = relay.nn.relu(
+
+    data = relay.var("data", shape=data_shape, dtype=dtype)
+    np_weight = np.ones(weight_shape).astype(dtype)
+    weight = relay.const(np_weight)
+    np_bias = np.ones(bias_shape).astype(dtype)
+    bias = relay.const(np_bias)
+
+        
+    op = relay.nn.relu(
             data=data,
             )
-    op1 = relay.nn.relu(
-            data=op0,
-            )
-    op2 = relay.nn.relu(
-            data=op1,
-            )
+    op = relay.nn.conv2d(
+            data=op,
+            weight=weight,
+            channels=channels,
+            kernel_size=kernel_size,
+            strides=strides,
+            padding=padding,
+            data_layout='NCHW')
+    
+    op = relay.nn.bias_add(op, bias)
 
     # save the infp to txt
-    return op2
+    return op
+
+# def simplenet():    
+
+#     data = relay.var("data", shape=data_shape, dtype=dtype)
+
+#     op0 = relay.nn.relu(
+#             data=data,
+#             )
+#     op1 = relay.nn.relu(
+#             data=op0,
+#             )
+#     op2 = relay.nn.relu(
+#             data=op1,
+#             )
+
+#     # save the infp to txt
+#     return op2
 #####################################
 # Determine quantization parameters
 #####################################
@@ -133,12 +143,7 @@ target = "llvm"
 
 #####################################
 # Prepare calibration dataset
-#####################################
-data_set=[]
-for x in range(1):
-    data_set.append({"data":np_data})
-
-dev = tvm.device(str(target), 0)
+####################################
 
 print("ori\n")
 print(mod_original)
@@ -146,8 +151,9 @@ print(mod_original)
 # with tvm.transform.PassContext(opt_level=3):
 #     with QConfig:
 #         mod_tiling, dbg_mod = relay.transform.LayerGroupTiling(mod_original, params=params)
-mod_tiling = relay.transform.LayerGroupTiling(mod_original)
-
+mod_tiling = relay.transform.LayerGroupTiling(mod_original, 200704, 1)
+optimizepass = tvm.transform.Sequential([tvm.relay.transform.InferType()])
+mod_tiling = optimizepass(mod_tiling)
 print("tiling\n")
 print(mod_tiling)
 ######################################
@@ -158,6 +164,11 @@ with tvm.transform.PassContext(opt_level=3):
     with QConfig:
         quantized_lib = relay.build(mod_original, target=target, params=params)
 
+data_set=[]
+for x in range(1):
+    data_set.append({"data":np_data})
+
+dev = tvm.device(str(target), 0)
 compiled_module = graph_executor.GraphModule(quantized_lib["default"](dev))
 compiled_module.set_input("data",np_data)
 compiled_module.run()
@@ -166,3 +177,4 @@ compiled_module.run()
 network_output = compiled_module.get_output(0).numpy()
 
 print(network_output)
+print(network_output.shape)
