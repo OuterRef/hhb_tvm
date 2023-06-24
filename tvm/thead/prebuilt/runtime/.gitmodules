@@ -1,0 +1,3 @@
+[submodule "cmd_parse/cmdline"]
+	path = cmd_parse/cmdline
+	url = git@github.com:zhangwm-pt/cmdline.git
