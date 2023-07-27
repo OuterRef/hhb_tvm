@@ -4,6 +4,8 @@ import numpy as np
 import os
 import sys
 from tvm.contrib import graph_executor
+import logging
+import time
 
 # from tvm.relay.transform.transform import *
 
@@ -13,9 +15,10 @@ from tvm.contrib import graph_executor
 
 op_name = "conv_unit_test" # the name of save_dir and txt
 dtype = "float32"   # the Tensor data type
-data_shape = (1, 512, 14, 14)  # the Tensor data shape
-weight_shape = (512, 512, 1, 1)  # the Tensor weight shape
-bias_shape = (512,)
+data_shape = (1, 10, 96, 96)  # the Tensor data shape
+weight_shape = (10, 10, 1, 1)  # the Tensor weight shape
+bias_shape = (10,)
+sram_size = 32*1024
 have_weight = True
 have_bias = True
 per_channel = True
@@ -35,13 +38,13 @@ nbit_weight = 8
 do_simulation = False
 
 #setup data
-np_data = tvm.nd.array(np.random.rand(1, 512, 14, 14).astype(dtype))
+np_data = tvm.nd.array(np.random.rand(*data_shape).astype(dtype))
 # np.random.uniform(-1, 1, data_shape)
 # np_data = np.ones((1, 3, 224, 224))
 # np_weight = tvm.nd.array(np.random.uniform(-1, 1, weight_shape).astype(dtype))
 
-print("input")
-print(np_data)
+# print("input")
+# print(np_data)
 
 np_weight = tvm.nd.array(np.ones(weight_shape).astype(dtype))
 
@@ -56,15 +59,20 @@ savepath = "./" + op_name
 if not os.path.exists(savepath):
     os.mkdir(savepath)
 savepath = savepath + "/"
+logpath = savepath + op_name + time.strftime('_%y-%m-%d', time.localtime()) + ".log"
+logging.basicConfig(level=logging.DEBUG,
+                    filename=logpath,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    filemode="a")
 
 # create the op net
 def simplenet():    
 
     kernel_size = (1, 1)
     strides = (1, 1)
-    padding = (0, 0, 0,0 )
-    channels = 512
-    dilation = (1,1)
+    padding = (0, 0, 0, 0)
+    channels = 10
+    dilation = (1, 1)
 
 
     data = relay.var("data", shape=data_shape, dtype=dtype)
@@ -144,18 +152,19 @@ target = "llvm"
 #####################################
 # Prepare calibration dataset
 ####################################
-
-print("ori\n")
-print(mod_original)
+logging.info(f"SRAM size = {sram_size} Bytes")
+logging.info("--------- Original Relay ---------")
+logging.info(mod_original)
 
 # with tvm.transform.PassContext(opt_level=3):
 #     with QConfig:
 #         mod_tiling, dbg_mod = relay.transform.LayerGroupTiling(mod_original, params=params)
-mod_tiling = relay.transform.LayerGroupTiling(mod_original, 200704, 1)
+# mod_tiling = relay.transform.LayerGroupTiling(mod_original, 200704, 1)
+mod_tiling = relay.transform.LayerGroupTiling(mod_original, sram_size, 1)
 optimizepass = tvm.transform.Sequential([tvm.relay.transform.InferType()])
 mod_tiling = optimizepass(mod_tiling)
-print("tiling\n")
-print(mod_tiling)
+logging.info("--------- After Tiling ---------")
+logging.info(mod_tiling)
 ######################################
 # Build and Run the quantized model
 ######################################
@@ -176,5 +185,6 @@ compiled_module.run()
 ## just get the first output
 network_output = compiled_module.get_output(0).numpy()
 
-print(network_output)
-print(network_output.shape)
+# print(network_output)
+logging.info(f"output shape: {network_output.shape}")
+logging.info("-"*80 + "\n\n")

@@ -23,6 +23,7 @@ from collections import defaultdict
 
 import functools
 import inspect
+import itertools
 import types
 import warnings
 
@@ -1729,9 +1730,10 @@ def LayerGroupTiling(mod, sram_size, element_size):
             self._sram_size = sram_size
             self._element_size = element_size
             self.target = [
-                "nn.relu",
-                "nn.conv2d",
                 "nn.bias_add",
+                "nn.conv2d",
+                "nn.relu",
+                # "reshape",
             ]
             self.complex_ops = [
                 "nn.conv2d",
@@ -1747,34 +1749,43 @@ def LayerGroupTiling(mod, sram_size, element_size):
             first_op = False
             fuse_num = 0
             temp_num = 0
-            conv_num = 0
+            cmplx_num = 0
             tile_num = 0
-            tile_dim = "h"
-            tile_pos = []
+            last_tile_dims = [2]  # out_shape tile dim(s) idx
+            tile_dims = last_tile_dims
+            tile_pos = []       # [[[0, N], [0, C], [h-start, h-end], [0, W]], tile1, tile2, ...]
             current_call = call
             current_arg = call.args
             pre_call = current_arg[0]
-            
 
             if not current_call.op.name in self.target:
                 op_args = [self.visit(arg) for arg in current_call.args]
                 return relay.expr.Call(call.op, op_args, call.attrs, call.type_args, call.span)
 
             first_op = isinstance(pre_call, relay.Var)
-            
+
             temp_num = temp_num + 1
             temp_list.append(current_call)
             
             out_shape = relay.frontend.common.infer_shape(current_call)
-            oh = out_shape[2]
-            # Todo：只支持NCHW
-            assert(len(out_shape) == 4)
-            for i in range(oh):
-                tile_pos.append([i, i+1])
-            can_fuse, tile_pos = self.TryToTilingGroup(current_call, tile_dim, tile_pos)
+            tile_dims_iter_list = []
+            for tile_dim in tile_dims:
+                tile_dims_iter_list.append(range(out_shape[tile_dim]))
+            # Cartesian product for multiple tiling dims
+            for cartes_prod in itertools.product(*tile_dims_iter_list):
+                tile_idx_range = []
+                cartes_idx = 0
+                for i in range(len(out_shape)):
+                    if i in tile_dims or i - len(out_shape) in tile_dims:
+                        tile_idx_range.append([cartes_prod[cartes_idx], cartes_prod[cartes_idx]+1])
+                        cartes_idx += 1
+                    else:
+                        tile_idx_range.append([0, out_shape[i]])
+                tile_pos.append(tile_idx_range)
+            can_fuse, tile_dims, tile_pos = self.TryToTilingGroup(current_call, tile_dims, tile_pos)
             
-            if current_call.op.name in self.complex_ops and can_fuse:
-                conv_num = conv_num + 1
+            if can_fuse and current_call.op.name in self.complex_ops:
+                cmplx_num = cmplx_num + 1
                 call_list.extend(temp_list)
                 fuse_num = fuse_num + temp_num
                 temp_list = []
@@ -1787,61 +1798,46 @@ def LayerGroupTiling(mod, sram_size, element_size):
                     temp_list = []
                     temp_num = 0
                     
-            # print(current_call.op.name)
-            # if not first_op:
-            #     print(pre_call.op.name)
-            # print(fuse_num)
-            # print("***************intoloop")
             #TODO 从下向上遍历计算图，在支持h维度切分的情况下，第一个算子与之后每一个算子必须在target列表中（为了避开多输入算子，后续可以使用输入类型检查进一步细化），同时后续算子的输出只能有一个consumer（第一个算子的输出可以有多个consumer）
-            if not first_op:
-                # print("***************intoloop")
-                while (conv_num < 3 and pre_call.op.name in self.target and current_call.op.name in self.target
-                    and len(self._consumers_list[pre_call]) == 1
-                    and can_fuse and tile_dim == "h") :
-                    # print("***************intoloop")
-                    current_call = pre_call
-                    # Todo: if (符合要求):
-                    temp_num = temp_num + 1
-                    temp_list.append(current_call)
+            while (not first_op and can_fuse and cmplx_num < 3 and pre_call.op.name in self.target 
+                    and current_call.op.name in self.target and len(self._consumers_list[pre_call]) == 1) :
 
-                    current_arg = current_call.args
-                    pre_call = current_arg[0]
+                current_call = pre_call
+                temp_num = temp_num + 1
+                temp_list.append(current_call)
+                current_arg = current_call.args
+                pre_call = current_arg[0]
 
-                    # print(current_call.op.name)
-                    can_fuse, tile_pos = self.TryToTilingGroup(current_call, tile_dim, tile_pos)
-                    
-                    if current_call.op.name in self.complex_ops and can_fuse:
-                        conv_num = conv_num + 1
-                        call_list.extend(temp_list)
-                        fuse_num = fuse_num + temp_num
-                        temp_num = 0
-                        temp_list = []
-                        
-                    first_op = isinstance(pre_call, relay.Var)
-                    if first_op:
+                can_fuse, tile_dims, tile_pos = self.TryToTilingGroup(current_call, tile_dims, tile_pos)  # backward
+
+                if current_call.op.name in self.complex_ops and can_fuse:
+                    cmplx_num = cmplx_num + 1
+                    call_list.extend(temp_list)
+                    fuse_num = fuse_num + temp_num
+                    temp_num = 0
+                    temp_list = []
+                    if tile_dims == [1]:
                         break
                     
-                    if not pre_call.op.name in self.target and can_fuse:
-                        call_list.extend(temp_list)
-                        fuse_num = fuse_num + temp_num
-                        temp_list = []
-                        temp_num = 0
-            # print(can_fuse)
-            # print(conv_num)
+                first_op = isinstance(pre_call, relay.Var)
+                if first_op:
+                    break
+                
+                if not pre_call.op.name in self.target and can_fuse:
+                    call_list.extend(temp_list)
+                    fuse_num = fuse_num + temp_num
+                    temp_list = []
+                    temp_num = 0
+
             if not can_fuse:
-                if conv_num == 0:
-                    tile_dim = "oc"
+                if cmplx_num == 0:
+                    tile_dims = [1]
                     call_list.extend(temp_list)
                     fuse_num = fuse_num + temp_num
                     temp_num = 0
                     temp_list = []
                     if call_list[fuse_num - 1].op.name in self.complex_ops:
-                        conv_num = conv_num + 1
-                # elif conv_num == 1:
-                #     tile_dim = "oc"
-                #     temp_num = 0
-                #     temp_list = []
-                    
+                        cmplx_num = cmplx_num + 1    
 
             if first_op:
                 call_list.extend(temp_list)
@@ -1849,89 +1845,105 @@ def LayerGroupTiling(mod, sram_size, element_size):
                 temp_num = 0
                 temp_list = []
 
-            # print(fuse_num)
             current_call = call_list[fuse_num - 1]
-            
-            # print(fuse_num)
-            # print(len(call_list))
-            # print(tile_dim)
-            # print(call_list[0])
             op_args = [self.visit(arg) for arg in current_call.args]
-            # print("***************************************start tiling****************************************")
-            # 确定tilingshape
-            tile_dim_num = 2 if tile_dim == "h" else 1
-            
             can_fuse = False
-            # print(tile_dim)
-            
+
+            # TODO (bug): oc维度缺少能否完成最小tiling的检查，可能导致死循环
+            # determine tile_num
             while not can_fuse :
+                tile_dims = last_tile_dims
                 tile_num = tile_num + 1
                 tile_pos = []
                 pos_sum = 0
                 for i in range(tile_num):
-                    tile_len = (out_shape[tile_dim_num] + i) // tile_num
-                    tile_pos.append([pos_sum, pos_sum + tile_len])
+                    tile_len = (out_shape[tile_dims[0]] + i) // tile_num
+                    tile_idx_range = []
+                    for j in range(len(out_shape)):
+                        if j in tile_dims or j - len(out_shape) in tile_dims:
+                            tile_idx_range.append([pos_sum, pos_sum + tile_len])
+                        else:
+                            tile_idx_range.append([0, out_shape[j]])
+                    tile_pos.append(tile_idx_range)
                     pos_sum = pos_sum + tile_len
                 
-                for i in range(fuse_num):
-                    can_fuse, tile_pos = self.TryToTilingGroup(call_list[i], tile_dim, tile_pos)
+                for op in call_list:
+                    can_fuse, tile_dims, tile_pos = self.TryToTilingGroup(op, tile_dims, tile_pos)  # backward
+
                     if not can_fuse:
                         break
-            # print("***************get shape")
-            # print(tile_pos)
-            # print(tile_dim)
-            # print(fuse_num)
-            # print(conv_num)
+                if tile_num > out_shape[tile_dims[0]]:
+                    raise Exception("cannot be tiled along oc")
             
             # 对各层进行tiling
             group_out = []
             first_input_tile_list = []
-            first_input_tile_list = self.TileInput(call_list[fuse_num - 1], op_args[0], tile_num, tile_dim, tile_pos)
+            first_input_tile_list = self.TileInput(call_list[fuse_num - 1], op_args[0], tile_num, tile_dims, tile_pos)
             group_out.append(first_input_tile_list)
             
             for i in range(fuse_num):
                 input_tile_list = group_out[i]
                 current_call = call_list[fuse_num - 1 - i]
-                output_tile_list = self.GetOutputTile(current_call, tile_dim, input_tile_list, tile_pos)
+                output_tile_list, tile_dims, tile_pos = self.GetOutputTile(current_call, tile_dims, input_tile_list, tile_pos)  # forward
                 group_out.append(output_tile_list)
-            
-            for tile_output_call in group_out[fuse_num]:
-                newtileshape = relay.frontend.common.infer_shape(tile_output_call)
-                # print("newtileshape")
-                # print(newtileshape)
-            
+
             if tile_num == 1:
                 new_call =  group_out[fuse_num][0]
             else:
-                new_call =  relay.op.concatenate(group_out[fuse_num], tile_dim_num)
-            newcallshape = relay.frontend.common.infer_shape(new_call)
-            
-            # print("newcallshape")
-            # print(newcallshape)
-            # op_args = [self.visit(arg) for arg in call.args]
-            # new_call = relay.nn.relu(op_args[0])
+                new_call =  relay.op.concatenate(group_out[fuse_num], (len(out_shape)+tile_dims[0])%len(out_shape))
             
             return new_call
         
         # 从输出tile形状推断输入tile形状，目前只支持单维度拆分
-        def TryToTilingGroup(self, call, tile_dim, tile_pos):
+        def TryToTilingGroup(self, call, output_tile_dims, output_tile_pos):
             can_fuse = False
-            input_tile_pos_list = []
+            input_tile_pos = []
+            input_tile_dims = []
             out_shape = relay.frontend.common.infer_shape(call)
             max_tile_size = 0
             
             if call.op.name == "nn.relu":
-                input_tile_pos_list = tile_pos
+                input_tile_pos = output_tile_pos
+                input_tile_dims = output_tile_dims
+                for pos in output_tile_pos:
+                    tile_elem_cnt = 1
+                    for i in range(len(out_shape)):
+                        tile_elem_cnt *= pos[i][1] - pos[i][0]
+                    required_size = tile_elem_cnt * 2 * self._element_size
+                    max_tile_size = required_size if required_size > max_tile_size else max_tile_size
 
-                for output_tile_pos in tile_pos:
-                    tile_len = output_tile_pos[1] - output_tile_pos[0]
-                    if tile_dim == "h":
-                        required_size = out_shape[0] * out_shape[1] * out_shape[3] * tile_len * 2 * self._element_size
-                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
-                    elif tile_dim == "oc":
-                        required_size = out_shape[0] * out_shape[2] * out_shape[3] * tile_len * 2 * self._element_size
-                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
-                        
+            if call.op.name == "reshape":
+                in_shape = relay.frontend.common.infer_shape(call.args[0])
+                in_shape_prod = functools.reduce(lambda x, y: x * y, in_shape)
+                lhs_prod = functools.reduce(lambda x, y: x * y, out_shape[:output_tile_dims[0]])
+
+                # tiling dim cannot be reshaped
+                reshape_can_tile = False
+                tile_elem_cnt = 1
+                for idx, dim in enumerate(in_shape):
+                    if dim == out_shape[output_tile_dims[0]] and tile_elem_cnt == lhs_prod:
+                        reshape_can_tile = True
+                        ih_idx = idx
+                        input_tile_dims = [idx]
+                        break
+                    else:
+                        tile_elem_cnt *= dim
+                if not reshape_can_tile:
+                    raise Exception(f"cannot tile on {output_tile_dims}")
+                    # return False, output_tile_dims, input_tile_pos
+
+                for pos in output_tile_pos:
+                    tile_len = pos[output_tile_dims[0]][1] - pos[output_tile_dims[0]][0]
+                    required_size = in_shape_prod / out_shape[output_tile_dims[0]] * tile_len * 2 * element_size
+                    max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                    tile_idx_range = []
+                    for idx, in_dim in enumerate(in_shape):
+                        if idx == ih_idx:
+                            tile_idx_range.append(pos[output_tile_dims[0]])
+                        else:
+                            tile_idx_range.append([0, in_dim])
+                    input_tile_pos.append(tile_idx_range)
+
             if call.op.name == "nn.conv2d":
                 attrs = call.attrs
                 padding = attrs["padding"]
@@ -1942,7 +1954,10 @@ def LayerGroupTiling(mod, sram_size, element_size):
                 w_shape = weight.shape
                 w_h = w_shape[2]
                 in_shape = relay.frontend.common.infer_shape(call.args[0])
+                input_tile_dims = output_tile_dims
+                input_tile_pos = []
                 
+                assert len(output_tile_dims) == 1, "only single dimension tiling supported"
                 assert(dilation[1] == 1 and dilation[0] == 1)
                 
                 is_depthwise = False
@@ -1954,17 +1969,23 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         is_group = True
                         assert(not is_group)
                 
-                for output_tile_pos in tile_pos:
-                    input_tile_pos = []
-                    if tile_dim == "h":
+                for pos in output_tile_pos:
+                    # if tile_dim == "h":
+                    if output_tile_dims == [2]:
                         # if is_depthwise:
                         #     return False, input_tile_pos_list
-                        start = output_tile_pos[0] * strides[1] - padding[0] if (output_tile_pos[0] * strides[1] - padding[0]) > 0 else 0
-                        end = (output_tile_pos[1] - 1) * strides[1] + w_h - padding[0] if ((output_tile_pos[1] - 1) * strides[1] + w_h - padding[0]) < in_shape[2] else in_shape[2]
-                        input_tile_pos = [start, end]
-                        input_tile_pos_list.append(input_tile_pos)
+                        start = pos[2][0] * strides[1] - padding[0] if (pos[2][0] * strides[1] - padding[0]) > 0 else 0
+                        end = (pos[2][1] - 1) * strides[1] + w_h - padding[0] if ((pos[2][1] - 1) * strides[1] + w_h - padding[0]) < in_shape[2] else in_shape[2]
+                        # tile_idx_range = [start, end]
+                        tile_idx_range = []
+                        for idx, dim in enumerate(in_shape):
+                            if idx == output_tile_dims[0]:
+                                tile_idx_range.append([start, end])
+                            else:
+                                tile_idx_range.append([0, dim])
+                        input_tile_pos.append(tile_idx_range)
                         
-                        out_size = out_shape[0] * out_shape[1] * out_shape[3] * (output_tile_pos[1] - output_tile_pos[0]) * self._element_size
+                        out_size = out_shape[0] * out_shape[1] * out_shape[3] * (pos[2][1] - pos[2][0]) * self._element_size
                         in_size = in_shape[0] * in_shape[1] * in_shape[3] * (end - start) * self._element_size
                         w_size = w_shape[0] * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
                         
@@ -1979,25 +2000,24 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         # print(in_size)
                         # print(w_size)
                         # print(w_shape)
-                    if tile_dim == "oc":
+                    # if tile_dim == "oc":
+                    if output_tile_dims == [1]:
                         if is_depthwise:
-                            out_size = out_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * out_shape[2] * out_shape[3] * self._element_size
-                            in_size = in_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * in_shape[2] * in_shape[3] * self._element_size
-                            w_size = (output_tile_pos[1] - output_tile_pos[0]) * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
-                            required_size = out_size + in_size + w_size
-                            max_tile_size = required_size if required_size > max_tile_size else max_tile_size
-                            #若为oc切割，则将oc的排布输出出去
-                            input_tile_pos = output_tile_pos
-                            input_tile_pos_list.append(input_tile_pos)
+                            out_size = out_shape[0] * (pos[1][1] - pos[1][0]) * out_shape[2] * out_shape[3] * self._element_size
+                            in_size = in_shape[0] * (pos[1][1] - pos[1][0]) * in_shape[2] * in_shape[3] * self._element_size
                         else:
-                            out_size = out_shape[0] * (output_tile_pos[1] - output_tile_pos[0]) * out_shape[2] * out_shape[3] * self._element_size
+                            out_size = out_shape[0] * (pos[1][1] - pos[1][0]) * out_shape[2] * out_shape[3] * self._element_size
                             in_size = in_shape[0] * in_shape[1] * in_shape[2] * in_shape[3] * self._element_size
-                            w_size = (output_tile_pos[1] - output_tile_pos[0]) * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
-                            required_size = out_size + in_size + w_size
-                            max_tile_size = required_size if required_size > max_tile_size else max_tile_size
-                            #若为oc切割，则将oc的排布输出出去
-                            input_tile_pos = output_tile_pos
-                            input_tile_pos_list.append(input_tile_pos)
+                        w_size = (pos[1][1] - pos[1][0]) * w_shape[1] * w_shape[2] * w_shape[3] * self._element_size
+                        required_size = out_size + in_size + w_size
+                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                        tile_idx_range = []
+                        for idx, dim in enumerate(in_shape):
+                            if idx == output_tile_dims[0]:
+                                tile_idx_range.append(pos[idx])
+                            else:
+                                tile_idx_range.append([0, dim])
+                        input_tile_pos.append(tile_idx_range)
                         
                         # print("********************")
                         # print(output_tile_pos)
@@ -2011,42 +2031,44 @@ def LayerGroupTiling(mod, sram_size, element_size):
                 bias = call.args[1].data.asnumpy()
                 b_shape = bias.shape
                 assert(len(b_shape) == 1)
-                input_tile_pos_list = tile_pos
-
-                for output_tile_pos in tile_pos:
-                    tile_len = output_tile_pos[1] - output_tile_pos[0]
-                    if tile_dim == "h":
+                input_tile_pos = output_tile_pos
+                input_tile_dims = output_tile_dims
+                for pos in output_tile_pos:
+                    tile_elem_cnt = 1
+                    for i in range(len(out_shape)):
+                        tile_elem_cnt *= pos[i][1] - pos[i][0]
+                    if 1 in output_tile_dims:  # oc
+                        b_size = (pos[1][1] - pos[1][0]) * self._element_size
+                    else:
                         b_size = b_shape[0] * self._element_size
-                        required_size = out_shape[0] * out_shape[1] * out_shape[3] * tile_len * 2 * self._element_size + b_size
-                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
-                    elif tile_dim == "oc":
-                        b_size = (output_tile_pos[1] - output_tile_pos[0]) * self._element_size
-                        required_size = out_shape[0] * out_shape[2] * out_shape[3] * tile_len * 2 * self._element_size + b_size
-                        max_tile_size = required_size if required_size > max_tile_size else max_tile_size
+                    required_size = tile_elem_cnt * 2 * self._element_size + b_size
+                    max_tile_size = required_size if required_size > max_tile_size else max_tile_size
                 
             if max_tile_size <= self._sram_size:
                 can_fuse = True
             
-            return can_fuse, input_tile_pos_list
+            return can_fuse, input_tile_dims, input_tile_pos
         
-        def TileInput(self, first_call, input, tile_num, tile_dim, tile_pos):
+        def TileInput(self, first_call, input, tile_num, tile_dims, tile_pos):
+            assert len(tile_dims) == 1, "only single dimension tiling supported"
             input_tile_list = []
             if tile_num == 1:
                 input_tile_list.append(input)
                 return input_tile_list
             
             if first_call.op.name == "nn.relu":
-                tile_dim_num = 0
-                if tile_dim == "h":
-                    tile_dim_num = 2
-                elif tile_dim == "oc":
-                    tile_dim_num = 1
-                    
                 for i in range(tile_num):
-                    current_tile_size = tile_pos[i]
-                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                    current_tile_size = tile_pos[i][tile_dims[0]]
+                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dims[0]])
                     input_tile_list.append(slice)
             
+            if first_call.op.name == "reshape":
+                for i in range(tile_num):
+                    current_tile_size = tile_pos[i][tile_dims[0]]
+                    axe = (tile_dims[0] + len(tile_pos[i])) % len(tile_pos[i])
+                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [axe])
+                    input_tile_list.append(slice)
+
             if first_call.op.name == "nn.conv2d":
                 attrs = tiling_get_attrs(first_call.attrs)
                 groups = attrs["groups"]
@@ -2063,46 +2085,73 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         is_group = True
                         assert(not is_group)
                 
-                if tile_dim == "oc" :
+                # if tile_dim == "oc" :
+                if tile_dims == [1]:
                     if is_depthwise:
-                        tile_dim_num = 1
                         for i in range(tile_num):
-                            current_tile_size = tile_pos[i]
-                            slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                            current_tile_size = tile_pos[i][tile_dims[0]]
+                            slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dims[0]])
                             input_tile_list.append(slice)
                     else:
                         for i in range(tile_num):
                             input_tile_list.append(input)
-                elif tile_dim == "h":
-                    tile_dim_num = 2
+                # elif tile_dim == "h":
+                elif tile_dims == [2]:
                     for i in range(tile_num):
-                        current_tile_size = tile_pos[i]
-                        slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                        current_tile_size = tile_pos[i][tile_dims[0]]
+                        slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dims[0]])
                         input_tile_list.append(slice)    
                 
-            if first_call.op.name == "nn.bias_add":
-                tile_dim_num = 0
-                if tile_dim == "h":
-                    tile_dim_num = 2
-                elif tile_dim == "oc":
-                    tile_dim_num = 1
-                    
+            if first_call.op.name == "nn.bias_add": 
                 for i in range(tile_num):
-                    current_tile_size = tile_pos[i]
-                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dim_num])
+                    current_tile_size = tile_pos[i][tile_dims[0]]
+                    slice = relay.op.strided_slice(data = input, begin = [current_tile_size[0]], end = [current_tile_size[1]], axes = [tile_dims[0]])
                     input_tile_list.append(slice)
                     
             return input_tile_list
+        
         # 由前一个算子的call_list，向下传递
-        def GetOutputTile(self, call, tile_dim, input_tile_list, tile_pos):
+        def GetOutputTile(self, call, input_tile_dims, input_tile_list, input_tile_pos):
             output_tile_list = []
+            output_tile_dims = []
+            output_tile_pos = []
             
             if call.op.name == "nn.relu":
+                output_tile_dims = input_tile_dims
+                output_tile_pos = input_tile_pos
                 for tile_input in input_tile_list:
                     tile_output = relay.expr.Call(call.op, [tile_input], call.attrs, call.type_args, call.span)
                     output_tile_list.append(tile_output)
+            
+            if call.op.name == "reshape":
+                attrs = tiling_get_attrs(call.attrs)
+                out_shape = attrs["newshape"]
+                in_shape = relay.frontend.common.infer_shape(call.args[0])
+                lhs_prod = functools.reduce(lambda x, y: x * y, in_shape[:input_tile_dims[0]])
+                tile_elem_cnt = 1
+                for idx, dim in enumerate(out_shape):
+                    if dim == in_shape[input_tile_dims[0]] and tile_elem_cnt == lhs_prod:
+                        output_tile_dims = [idx]
+                        break
+                    else:
+                        tile_elem_cnt *= dim
+                new_shape = out_shape
+                for idx, tile_input in enumerate(input_tile_list):
+                    new_shape[output_tile_dims[0]] = input_tile_pos[idx][input_tile_dims[0]][1] - input_tile_pos[idx][input_tile_dims[0]][0]
+                    tile_output = relay.reshape(data=tile_input, newshape=new_shape)
+                    output_tile_list.append(tile_output)
                     
+                    tile_idx_range = []
+                    for out_idx, out_dim in enumerate(out_shape):
+                        if out_idx == output_tile_dims[0]:
+                            tile_idx_range.append(input_tile_pos[idx][input_tile_dims[0]])
+                        else:
+                            tile_idx_range.append([0, out_dim])
+                    output_tile_pos.append(tile_idx_range)
+            
             if call.op.name == "nn.conv2d":
+                output_tile_dims = input_tile_dims
+                output_tile_pos = []
                 attrs = tiling_get_attrs(call.attrs)
                 # Array<IndexExpr> strides;
                 # Array<IndexExpr> padding;
@@ -2131,6 +2180,7 @@ def LayerGroupTiling(mod, sram_size, element_size):
                 w_shape = weight.shape
                 
                 in_shape = relay.frontend.common.infer_shape(call.args[0])
+                out_shape = relay.frontend.common.infer_shape(call)
                 
                 is_depthwise = False
                 is_group = False
@@ -2142,8 +2192,10 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         assert(not is_group)
                 
                 tile_index = 0
+                pos_sum = 0
                 for tile_input in input_tile_list:
-                    if tile_dim == "h":
+                    # if tile_dim == "h":
+                    if input_tile_dims == [2]:
                         s_w_expr = relay.const(weight)
                         if tile_index == 0 and not tile_index == len(input_tile_list) - 1:
                             new_padding = [padding[0], padding[1], 0, padding[3]]
@@ -2169,13 +2221,24 @@ def LayerGroupTiling(mod, sram_size, element_size):
                             out_dtype = out_dtype
                         )
                         output_tile_list.append(tile_output)
-                        
-                    if tile_dim == "oc":
+
+                        oh = ((input_tile_pos[tile_index][2][1] - input_tile_pos[tile_index][2][0]) + (new_padding[0] + new_padding[2]) - kernel_size[1]) // strides[1] + 1
+                        tile_idx_range = []
+                        for idx, dim in enumerate(out_shape):
+                            if idx == input_tile_dims[0]:
+                                tile_idx_range.append([pos_sum, oh + pos_sum])
+                            else:
+                                tile_idx_range.append([0, dim])
+                        output_tile_pos.append(tile_idx_range)
+                        pos_sum = oh + pos_sum
+
+                    # if tile_dim == "oc":
+                    if input_tile_dims == [1]:
                         # inshape = relay.frontend.common.infer_shape(tile_input)
                         # print("inshape")
                         # print(inshape)
                         
-                        channel_pos = tile_pos[tile_index]
+                        channel_pos = input_tile_pos[tile_index][1]
                         s_weight = weight[channel_pos[0] : channel_pos[1], :, :, :]
                         s_weight_shape = s_weight.shape
                         s_w_expr = relay.const(s_weight)
@@ -2199,16 +2262,27 @@ def LayerGroupTiling(mod, sram_size, element_size):
                             out_dtype = out_dtype
                         )
                         output_tile_list.append(tile_output)
+
+                        tile_idx_range = []
+                        for idx, dim in enumerate(out_shape):
+                            if idx == input_tile_dims[0]:
+                                tile_idx_range.append(channel_pos)
+                            else:
+                                tile_idx_range.append([0, dim])
+                        output_tile_pos.append(tile_idx_range)
                         
                     tile_index = tile_index + 1
                     
             if call.op.name == "nn.bias_add":
+                output_tile_dims = input_tile_dims
+                output_tile_pos = input_tile_pos
                 attrs = call.attrs
                 bias = call.args[1].data.asnumpy()
                 tile_index = 0
                 for tile_input in input_tile_list:
                     inshape = relay.frontend.common.infer_shape(tile_input)
-                    if tile_dim == "h":
+                    # if tile_dim == "h":
+                    if input_tile_dims == [2]:
                         # b_shape = bias.shape
                         # s_bias = bias.reshape(1, b_shape[0], 1, 1)
                         # s_bias = np.broadcast_to(s_bias, (1, b_shape[0], inshape[2], inshape[3]))
@@ -2218,7 +2292,8 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         tile_output = relay.op.nn.bias_add(tile_input, call.args[1])
                         # tile_output = relay.expr.Call(call.op, [tile_input, call.args[1]], call.attrs, call.type_args, call.span)
                         output_tile_list.append(tile_output)
-                    if tile_dim == "oc":
+                    # if tile_dim == "oc":
+                    if input_tile_dims == [1]:
                         # channel_pos = tile_pos[tile_index]
                         # s_bias = bias[channel_pos[0] : channel_pos[1]]
                         # b_shape = s_bias.shape
@@ -2228,7 +2303,7 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         # tile_output = relay.op.add(tile_input, s_b_expr)
                         
                         
-                        channel_pos = tile_pos[tile_index]
+                        channel_pos = input_tile_pos[tile_index][1]
                         s_bias = bias[channel_pos[0] : channel_pos[1]]
                         s_b_expr = relay.const(s_bias)
                         tile_output = relay.op.nn.bias_add(tile_input, s_b_expr)
@@ -2237,7 +2312,7 @@ def LayerGroupTiling(mod, sram_size, element_size):
                         
                     tile_index = tile_index + 1
                 
-            return output_tile_list
+            return output_tile_list, output_tile_dims, output_tile_pos
     
     lookup = LookUpClass()
     lookup.visit(mod["main"])
